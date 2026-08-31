@@ -349,6 +349,7 @@ classes = (
     operators.VFX_OT_create_layer,
     operators.VFX_OT_add_selected_to_layer,
     operators.VFX_OT_remove_selected_from_layer,
+    operators.VFX_OT_add_selected_lights,
     operators.VFX_OT_create_shadow_pass,
     operators.VFX_OT_delete_layer,
     operators.VFX_OT_rename_layer,

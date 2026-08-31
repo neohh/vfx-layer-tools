@@ -11,7 +11,7 @@ from .core import (
     ensure_root, ensure_camera_collection, ensure_light_collection,
     create_empty_scene, exclude_collection_in_master, link_collection_to_scene,
     sync_scene_settings, remove_scene_safe, remove_shadow_collections,
-    rename_layer, link_lights_to_all_scenes,
+    rename_layer, link_lights_to_all_scenes, sync_master_lights,
 )
 from .shadow import (
     set_shadow_catcher, set_only_shadow_caster, refresh_shadow_proxies,
@@ -204,6 +204,39 @@ class VFX_OT_remove_selected_from_layer(bpy.types.Operator):
                 count += 1
 
         self.report({'INFO'}, f"Removed {count} object(s) from {layer.layer_name}")
+        return {'FINISHED'}
+
+
+class VFX_OT_add_selected_lights(bpy.types.Operator):
+    bl_idname = "vfx.add_selected_lights"
+    bl_label = "Add Selected Lights"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=True)
+        root = ensure_root(master)
+        col = ensure_light_collection(master, root)
+
+        lights = [o for o in (context.selected_objects or []) if o.type == 'LIGHT']
+        if not lights:
+            self.report({'ERROR'}, "No selected lights")
+            return {'CANCELLED'}
+
+        count = 0
+        for obj in lights:
+            for c in list(obj.users_collection):
+                try:
+                    c.objects.unlink(obj)
+                except Exception:
+                    pass
+
+            if col.objects.get(obj.name) is None:
+                col.objects.link(obj)
+                count += 1
+
+        link_lights_to_all_scenes(vfx, col)
+
+        self.report({'INFO'}, f"Moved {count} light(s) into VFX_Lights")
         return {'FINISHED'}
 
 

@@ -107,6 +107,7 @@ class VFX_PT_main(bpy.types.Panel):
 
         layout.operator_context = 'INVOKE_DEFAULT'
         layout.operator("vfx.create_layer", icon='ADD')
+        layout.operator("vfx.add_selected_lights", text="Add Selected Lights", icon='LIGHT')
 
         layout.template_list(
             "VFX_UL_layers",

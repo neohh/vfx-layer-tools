@@ -131,6 +131,19 @@ def link_lights_to_all_scenes(vfx, col):
             link_collection_to_scene(layer.shadow_scene, col)
 
 
+def sync_master_lights(master, root=None):
+    if root is None:
+        root = ensure_root(master)
+    col = ensure_light_collection(master, root)
+
+    count = 0
+    for obj in master.objects:
+        if obj.type == 'LIGHT':
+            if col.objects.get(obj.name) is None:
+                col.objects.link(obj)
+                count += 1
+
+    return count
 
 
 # ---------------------------------------------------------------------

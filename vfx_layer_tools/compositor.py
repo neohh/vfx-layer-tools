@@ -91,7 +91,69 @@ def get_comp_tree(master, create=True):
 # COMP FROM FILES
 # ---------------------------------------------------------------------
 
+def _load_sequence_image(scene_name, base_path):
+    """Fallback: load EXR sequence via image.load + SEQUENCE source."""
+    img_name = f"VFX_SEQ_{scene_name}"
+    abs_base = bpy.path.abspath(base_path)
+    folder = os.path.join(abs_base, scene_name)
+
+    existing = bpy.data.images.get(img_name)
+    if existing is not None:
+        if os.path.isdir(folder):
+            files = [f for f in os.listdir(folder) if f.lower().endswith('.exr')]
+            if files:
+                existing.source = 'SEQUENCE'
+                try:
+                    existing.filepath_raw = os.path.join(folder, "####.exr")
+                    existing.frame_duration = max(1, len(files))
+                    existing.reload()
+                except Exception:
+                    pass
+                print(f"VFX SEQ refresh: {img_name} files={len(files)}")
+        return existing
+
+    if not os.path.isdir(folder):
+        print(f"VFX: folder not found: {folder}")
+        return None
+
+    files = sorted([f for f in os.listdir(folder) if f.lower().endswith('.exr')])
+    if not files:
+        print(f"VFX: no EXR in {folder}")
+        return None
+
+    first_file = os.path.join(folder, files[0])
+    try:
+        img = bpy.data.images.load(first_file, check_existing=False)
+    except Exception as e:
+        print(f"VFX: load failed {first_file}: {e}")
+        return None
+
+    start_frame = 1
+    try:
+        digits = "".join(ch for ch in files[0] if ch.isdigit())
+        if digits:
+            start_frame = int(digits)
+    except Exception:
+        pass
+
+    img.name = img_name
+    img.source = 'SEQUENCE'
+    try:
+        img.filepath_raw = os.path.join(folder, "####.exr")
+        img.filepath = img.filepath_raw
+        img.frame_start = start_frame
+        img.frame_offset = 0
+        img.frame_duration = max(1, len(files))
+        img.reload()
+    except Exception:
+        pass
+
+    print(f"VFX SEQ load: {img_name} <- {folder} files={len(files)} start={start_frame}")
+    return img
+
+
 def _load_sequence_image2(scene_name, base_path):
+    """Primary: load EXR sequence via ops.image.open for proper multi-file import."""
     img_name = f"VFX_SEQ_{scene_name}"
     abs_base = bpy.path.abspath(base_path)
     folder = os.path.join(abs_base, scene_name)
@@ -102,7 +164,7 @@ def _load_sequence_image2(scene_name, base_path):
                         if f.lower().endswith('.exr')])
     if not files:
         print("VFX SEQ2: no EXR in", folder)
-        return None
+        return _load_sequence_image(scene_name, base_path)
 
     start_frame = 1
     digits = "".join(ch for ch in files[0] if ch.isdigit())
@@ -137,13 +199,13 @@ def _load_sequence_image2(scene_name, base_path):
             )
     except Exception as e:
         print("VFX SEQ2: ops open failed:", e)
-        return None
+        return _load_sequence_image(scene_name, base_path)
 
     new_imgs = [bpy.data.images[k]
                 for k in (set(bpy.data.images.keys()) - before)]
     if not new_imgs:
-        print("VFX SEQ2: no new image")
-        return None
+        print("VFX SEQ2: no new image, fallback")
+        return _load_sequence_image(scene_name, base_path)
 
     img = new_imgs[0]
     img.name = img_name
