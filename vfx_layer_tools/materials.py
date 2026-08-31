@@ -31,6 +31,13 @@ def _trigger_comp(context):
         vfx = scene.vfx
         master = vfx.master_scene or scene
         build_comp_assembly(vfx, master)
+        # Auto-calibrate mist from scene geometry when fog is enabled
+        if getattr(vfx, 'use_fog', False):
+            try:
+                from .compositor import auto_calibrate_mist
+                auto_calibrate_mist(vfx, master)
+            except Exception:
+                pass
         for window in bpy.context.window_manager.windows:
             for area in window.screen.areas:
                 area.tag_redraw()

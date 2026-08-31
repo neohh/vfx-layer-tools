@@ -151,6 +151,7 @@ class VFX_PT_main(bpy.types.Panel):
             fb = fogbox.column(align=True)
             fb.prop(vfx, "mist_start")
             fb.prop(vfx, "mist_depth")
+            fb.operator("vfx.auto_calibrate_mist", text="Auto-Calibrate from Scene", icon='FILE_REFRESH')
             fr2 = fb.row(align=True)
             fr2.prop(vfx, "ramp_black")
             fr2.prop(vfx, "ramp_white")
@@ -232,6 +233,11 @@ class VFX_PT_main(bpy.types.Panel):
         row.prop(vfx, "shadows_engine", text="Shd")
 
         layout.operator("vfx.rebuild_comp", text="Rebuild Comp", icon='FILE_REFRESH')
+
+        # DIAGNOSTIC
+        diag_row = layout.row(align=True)
+        diag_row.operator("vfx.diagnose", text="Diagnostics", icon='CONSOLE')
+        diag_row.operator("vfx.force_enable_passes", text="Enable Passes", icon='CHECKMARK')
 
         # GLOW / GLARE
         glowbox = layout.box()

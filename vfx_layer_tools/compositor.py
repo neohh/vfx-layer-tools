@@ -1,6 +1,7 @@
 """VFX Layer Tools — compositor node tree, fog system."""
 
 import bpy
+import mathutils
 import os
 
 from .core import (
@@ -114,11 +115,15 @@ def _load_sequence_image(scene_name, base_path):
 
     if not os.path.isdir(folder):
         print(f"VFX: folder not found: {folder}")
+        print(f"  (resolved from output_dir='{base_path}', scene='{scene_name}')")
+        print(f"  -> Run 'Render All Layers' first, or check output_dir.")
         return None
 
     files = sorted([f for f in os.listdir(folder) if f.lower().endswith('.exr')])
     if not files:
         print(f"VFX: no EXR in {folder}")
+        print(f"  (resolved from output_dir='{base_path}', scene='{scene_name}')")
+        print(f"  -> Run 'Render All Layers' first.")
         return None
 
     first_file = os.path.join(folder, files[0])
@@ -163,7 +168,9 @@ def _load_sequence_image2(scene_name, base_path):
         files = sorted([f for f in os.listdir(folder)
                         if f.lower().endswith('.exr')])
     if not files:
-        print("VFX SEQ2: no EXR in", folder)
+        print(f"VFX SEQ2: no EXR in {folder}")
+        print(f"  (resolved from output_dir='{base_path}', scene='{scene_name}')")
+        print(f"  -> Run 'Render All Layers' first, or check output_dir setting.")
         return _load_sequence_image(scene_name, base_path)
 
     start_frame = 1
@@ -187,6 +194,11 @@ def _load_sequence_image2(scene_name, base_path):
     win = None
     if bpy.context.window_manager.windows:
         win = bpy.context.window_manager.windows[0]
+
+    if win is None:
+        # No window available (headless / timer context) — use fallback
+        print("VFX SEQ2: no window, using fallback loader")
+        return _load_sequence_image(scene_name, base_path)
 
     before = set(bpy.data.images.keys())
     try:
@@ -231,6 +243,7 @@ def rebuild_comp_from_files(vfx, master):
             nt.nodes.remove(node)
 
     y = 0
+    missing_exr = []
     for layer in vfx.layers:
         if not layer.enabled:
             continue
@@ -248,6 +261,10 @@ def rebuild_comp_from_files(vfx, master):
                 node.name = node_name
             if img is not None:
                 node.image = img
+                # Multi-channel EXR: Image node will auto-expose Mist, Normal, Z
+                # outputs once the image data is loaded by Blender.
+            else:
+                missing_exr.append(layer.layer_name)
             node.label = layer.layer_name
             node["vfx_id"] = layer.id
             node["vfx_pass"] = "OBJECT"
@@ -266,12 +283,18 @@ def rebuild_comp_from_files(vfx, master):
                 node.name = node_name
             if img is not None:
                 node.image = img
+            else:
+                missing_exr.append(f"{layer.layer_name} SHD")
             node.label = f"{layer.layer_name} SHD"
             node["vfx_id"] = layer.id
             node["vfx_pass"] = "SHADOW"
             node.location = (320, y)
 
         y -= 220
+
+    if missing_exr:
+        print(f"VFX: EXR files not found for: {', '.join(missing_exr)}")
+        print("  -> Run 'Render All Layers' first to generate EXR files.")
 
     valid_names = set()
     for layer in vfx.layers:
@@ -1105,11 +1128,25 @@ def build_comp_assembly(vfx, master, nt=None):
     if view_sock is None:
         view_sock = current
 
+    # Ensure a Viewer node exists so the compositor shows output
+    viewer = None
     for node in nt.nodes:
-        if node.type == 'VIEWER' and len(node.inputs) > 0:
-            vsock = node.inputs.get("Image") or node.inputs[0]
-            nt.links.new(view_sock, vsock)
+        if node.type == 'VIEWER':
+            viewer = node
             break
+    if viewer is None:
+        try:
+            viewer = nt.nodes.new("CompositorNodeViewer")
+            viewer.name = "VFX_Viewer"
+            viewer.label = "Viewer"
+            viewer.location = (900, -250)
+        except Exception:
+            viewer = None
+    if viewer is not None and len(viewer.inputs) > 0:
+        vsock = viewer.inputs.get("Image") or viewer.inputs[0]
+        for l in list(vsock.links):
+            nt.links.remove(l)
+        nt.links.new(view_sock, vsock)
 
 
 
@@ -1177,4 +1214,107 @@ def _setup_fog_passes(vfx, master, force=False):
             vl.use_pass_mist = True
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------
+# AUTO-CALIBRATE MIST
+# ---------------------------------------------------------------------
+
+def auto_calibrate_mist(vfx, master):
+    """Analyze scene from camera view, find nearest/farthest actual
+    geometry surfaces, and set mist_start / mist_depth so the Mist
+    pass maps 0..1 across the visible geometry with generous padding.
+
+    Iterates real mesh vertices (evaluated via depsgraph) projected
+    onto the camera Z axis — no ray-casting, no bounding-box tricks.
+
+    Returns True on success, False if calibration was skipped.
+    """
+    cam = master.camera
+    if cam is None:
+        print("VFX: no camera in master scene — cannot auto-calibrate mist")
+        return False
+
+    cam_inv = cam.matrix_world.inverted()
+    cam_pos = cam.matrix_world.to_translation()
+
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    drawable_types = {'MESH', 'CURVE', 'SURFACE', 'META', 'VOLUME'}
+
+    min_depth = float('inf')
+    max_depth = 0.0
+    vertex_count = 0
+
+    for layer in vfx.layers:
+        if not layer.enabled or not layer.collection:
+            continue
+        for obj in layer.collection.objects:
+            if obj.type not in drawable_types or obj.hide_render:
+                continue
+            # Get evaluated (modifier-applied) object
+            try:
+                eval_obj = obj.evaluated_get(depsgraph)
+            except Exception:
+                continue
+
+            # Get mesh data from evaluated object
+            try:
+                mesh = eval_obj.to_mesh()
+            except Exception:
+                continue
+
+            if mesh is None or len(mesh.vertices) == 0:
+                continue
+
+            # Transform each vertex to camera space and project onto Z
+            obj_world = eval_obj.matrix_world
+            for v in mesh.vertices:
+                world_pt = obj_world @ v.co
+                # Camera-local Z = distance along camera's forward axis
+                local_pt = cam_inv @ world_pt
+                cam_z = -local_pt.z  # Blender camera looks down -Z
+                if cam_z > 0:
+                    min_depth = min(min_depth, cam_z)
+                    max_depth = max(max_depth, cam_z)
+                    vertex_count += 1
+
+            eval_obj.to_mesh_clear()
+
+    if vertex_count == 0 or max_depth <= 0:
+        print("VFX: no geometry visible from camera — cannot auto-calibrate mist")
+        return False
+
+    # ---- Compute mist range ----
+    span = max_depth - min_depth
+    # Generous padding: 15% of span but at least 0.5 units
+    # so mist gradient starts well before nearest and ends after farthest
+    pad = max(span * 0.15, 0.5)
+    mist_start = max(0.0, min_depth - pad)
+    mist_depth = span + 2 * pad
+
+    # Write into VFX properties
+    vfx.mist_start = mist_start
+    vfx.mist_depth = mist_depth
+
+    # Write into world mist settings (used by the fog-map scene)
+    w = master.world
+    if w is not None:
+        try:
+            w.mist_settings.start = mist_start
+            w.mist_settings.depth = mist_depth
+        except Exception:
+            pass
+
+    # Also sync to fog-map scene if it has a separate world
+    fm = getattr(vfx, 'fog_map_scene', None)
+    if fm is not None and fm.world is not None and fm.world is not w:
+        try:
+            fm.world.mist_settings.start = mist_start
+            fm.world.mist_settings.depth = mist_depth
+        except Exception:
+            pass
+
+    print(f"VFX: auto-calibrated mist  start={mist_start:.3f}  depth={mist_depth:.3f}")
+    print(f"       nearest={min_depth:.3f}  farthest={max_depth:.3f}  vertices={vertex_count}")
+    return True
 
