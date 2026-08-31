@@ -2,6 +2,9 @@
 
 import bpy
 import time
+from bpy.props import (
+    StringProperty, BoolProperty, IntProperty, FloatProperty, EnumProperty,
+)
 
 from .core import (
     uid, get_project, active_layer, collect_objects, default_layer_name,
