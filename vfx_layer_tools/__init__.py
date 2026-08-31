@@ -22,16 +22,58 @@ from bpy.props import (
     PointerProperty,
 )
 
-from .core import get_project, active_layer, sync_scene_settings, ensure_root
-from .shadow import set_shadow_catcher, refresh_shadow_proxies, repair_shadow_proxies
-from .compositor import (
-    get_comp_tree, rebuild_comp, rebuild_comp_from_files,
-    build_comp_assembly, _setup_fog_passes, _ensure_fogmap,
-    _cleanup_fog_nodes, _get_mist_socket, _update_mist,
-)
-from .materials import _trigger_rebuild, _trigger_comp, _last_adjust_stats
-from . import operators
-from . import ui
+
+# ---------------------------------------------------------------------
+# CALLBACKS (defined early so PropertyGroup lambdas can reference them)
+# ---------------------------------------------------------------------
+
+def _trigger_rebuild(context):
+    try:
+        from .materials import _trigger_rebuild as _impl
+        _impl(context)
+    except Exception:
+        pass
+
+
+def _trigger_comp(context):
+    try:
+        from .materials import _trigger_comp as _impl
+        _impl(context)
+    except Exception:
+        pass
+
+
+def _update_mist(context):
+    try:
+        from .compositor import _update_mist as _impl
+        _impl(context)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------
+# ENGINE ITEMS
+# ---------------------------------------------------------------------
+
+def _engine_label(i):
+    return i.replace("BLENDER_", "").replace("_", " ").title()
+
+
+def _engine_items_eevee_first(self, context):
+    ids = [i.identifier for i in bpy.types.RenderSettings.bl_rna.properties['engine'].enum_items]
+    if "CYCLES" not in ids:
+        ids = ["CYCLES"] + ids
+    pref = "BLENDER_EEVEE_NEXT" if "BLENDER_EEVEE_NEXT" in ids else (ids[0] if ids else "CYCLES")
+    ordered = [pref] + [i for i in ids if i != pref]
+    return [(i, _engine_label(i), "") for i in ordered]
+
+
+def _engine_items_cycles_first(self, context):
+    ids = [i.identifier for i in bpy.types.RenderSettings.bl_rna.properties['engine'].enum_items]
+    if "CYCLES" not in ids:
+        ids = ["CYCLES"] + ids
+    ordered = ["CYCLES"] + [i for i in ids if i != "CYCLES"]
+    return [(i, _engine_label(i), "") for i in ordered]
 
 
 # ---------------------------------------------------------------------
@@ -101,27 +143,6 @@ class VFXLayer(bpy.types.PropertyGroup):
         description="Show shadow pass sub-row",
         default=False
     )
-
-
-def _engine_label(i):
-    return i.replace("BLENDER_", "").replace("_", " ").title()
-
-
-def _engine_items_eevee_first(self, context):
-    ids = [i.identifier for i in bpy.types.RenderSettings.bl_rna.properties['engine'].enum_items]
-    if "CYCLES" not in ids:
-        ids = ["CYCLES"] + ids
-    pref = "BLENDER_EEVEE_NEXT" if "BLENDER_EEVEE_NEXT" in ids else (ids[0] if ids else "CYCLES")
-    ordered = [pref] + [i for i in ids if i != pref]
-    return [(i, _engine_label(i), "") for i in ordered]
-
-
-def _engine_items_cycles_first(self, context):
-    ids = [i.identifier for i in bpy.types.RenderSettings.bl_rna.properties['engine'].enum_items]
-    if "CYCLES" not in ids:
-        ids = ["CYCLES"] + ids
-    ordered = ["CYCLES"] + [i for i in ids if i != "CYCLES"]
-    return [(i, _engine_label(i), "") for i in ordered]
 
 
 class VFXProject(bpy.types.PropertyGroup):
@@ -300,10 +321,21 @@ class VFXProject(bpy.types.PropertyGroup):
     )
 
 
+# ---------------------------------------------------------------------
+# SUBMODULE IMPORTS (after class definitions to avoid circular import)
+# ---------------------------------------------------------------------
 
-# ---------------------------------------------------------------------
-# UPDATE CALLBACKS (forward-declared for PropertyGroup lambdas)
-# ---------------------------------------------------------------------
+from .core import get_project, active_layer, sync_scene_settings, ensure_root
+from .shadow import set_shadow_catcher, refresh_shadow_proxies, repair_shadow_proxies
+from .compositor import (
+    get_comp_tree, rebuild_comp, rebuild_comp_from_files,
+    build_comp_assembly, _setup_fog_passes, _ensure_fogmap,
+    _cleanup_fog_nodes, _get_mist_socket,
+)
+from .materials import _last_adjust_stats
+from . import operators
+from . import ui
+
 
 # ---------------------------------------------------------------------
 # REGISTER
