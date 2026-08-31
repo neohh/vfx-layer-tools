@@ -333,8 +333,21 @@ from .compositor import (
     _cleanup_fog_nodes, _get_mist_socket,
 )
 from .materials import _last_adjust_stats
-from . import operators
-from . import ui
+from .operators import (
+    VFX_OT_set_master, VFX_OT_create_layer,
+    VFX_OT_add_selected_to_layer, VFX_OT_remove_selected_from_layer,
+    VFX_OT_add_selected_lights, VFX_OT_create_shadow_pass,
+    VFX_OT_delete_layer, VFX_OT_rename_layer, VFX_OT_reset_lighting,
+    VFX_OT_toggle_layer_expand, VFX_OT_toggle_fog_expand,
+    VFX_OT_drag_layer, VFX_OT_move_layer_up, VFX_OT_move_layer_down,
+    VFX_OT_debug_layer, VFX_OT_rebuild_comp,
+    VFX_OT_render_all_layers, VFX_OT_one_click_exr,
+    VFX_OT_create_background, VFX_OT_delete_background,
+    VFX_OT_delete_shadow_pass, VFX_OT_refresh_proxies,
+)
+from .ui import (
+    VFX_UL_layers, VFX_PT_main, VFX_PT_compositor,
+)
 
 
 # ---------------------------------------------------------------------
@@ -344,31 +357,31 @@ from . import ui
 classes = (
     VFXLayer,
     VFXProject,
-    ui.VFX_UL_layers,
-    operators.VFX_OT_set_master,
-    operators.VFX_OT_create_layer,
-    operators.VFX_OT_add_selected_to_layer,
-    operators.VFX_OT_remove_selected_from_layer,
-    operators.VFX_OT_add_selected_lights,
-    operators.VFX_OT_create_shadow_pass,
-    operators.VFX_OT_delete_layer,
-    operators.VFX_OT_rename_layer,
-    operators.VFX_OT_reset_lighting,
-    operators.VFX_OT_toggle_layer_expand,
-    operators.VFX_OT_toggle_fog_expand,
-    operators.VFX_OT_drag_layer,
-    operators.VFX_OT_move_layer_up,
-    operators.VFX_OT_move_layer_down,
-    operators.VFX_OT_debug_layer,
-    operators.VFX_OT_rebuild_comp,
-    operators.VFX_OT_render_all_layers,
-    operators.VFX_OT_one_click_exr,
-    operators.VFX_OT_create_background,
-    operators.VFX_OT_delete_background,
-    operators.VFX_OT_delete_shadow_pass,
-    operators.VFX_OT_refresh_proxies,
-    ui.VFX_PT_main,
-    ui.VFX_PT_compositor,
+    VFX_UL_layers,
+    VFX_OT_set_master,
+    VFX_OT_create_layer,
+    VFX_OT_add_selected_to_layer,
+    VFX_OT_remove_selected_from_layer,
+    VFX_OT_add_selected_lights,
+    VFX_OT_create_shadow_pass,
+    VFX_OT_delete_layer,
+    VFX_OT_rename_layer,
+    VFX_OT_reset_lighting,
+    VFX_OT_toggle_layer_expand,
+    VFX_OT_toggle_fog_expand,
+    VFX_OT_drag_layer,
+    VFX_OT_move_layer_up,
+    VFX_OT_move_layer_down,
+    VFX_OT_debug_layer,
+    VFX_OT_rebuild_comp,
+    VFX_OT_render_all_layers,
+    VFX_OT_one_click_exr,
+    VFX_OT_create_background,
+    VFX_OT_delete_background,
+    VFX_OT_delete_shadow_pass,
+    VFX_OT_refresh_proxies,
+    VFX_PT_main,
+    VFX_PT_compositor,
 )
 
 CLASS_NAMES = tuple(cls.__name__ for cls in classes)
