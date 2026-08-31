@@ -802,6 +802,14 @@ class VFX_OT_render_all_layers(bpy.types.Operator):
         except Exception as e:
             print("VFX proxy refresh error:", e)
 
+        # Auto-calibrate mist BEFORE render so EXR gets correct mist data
+        if getattr(vfx, 'use_fog', False):
+            try:
+                from .compositor import auto_calibrate_mist
+                auto_calibrate_mist(vfx, master)
+            except Exception as e:
+                print("VFX pre-render auto-calibrate error:", e)
+
         self.steps = []
         total_frames = 0
         for sc in scenes:
@@ -817,9 +825,41 @@ class VFX_OT_render_all_layers(bpy.types.Operator):
                 sc.render.filepath = f"{vfx.output_dir}{sc.name}/"
             except Exception:
                 pass
+            # Ensure render passes are enabled for multi-channel EXR
+            for vl in sc.view_layers:
+                for attr in ('use_pass_mist', 'use_pass_z', 'use_pass_normal'):
+                    try:
+                        setattr(vl, attr, True)
+                    except Exception:
+                        pass
             n = (sc.frame_end - sc.frame_start + 1)
             total_frames += n
             self.steps.append((sc.name, n))
+
+        # Also render FOGMAP scene if fog is enabled
+        if getattr(vfx, 'use_fog', False):
+            fm = getattr(vfx, 'fog_map_scene', None)
+            if fm is not None:
+                try:
+                    fm.frame_start = master.frame_start
+                    fm.frame_end = master.frame_end
+                except Exception:
+                    pass
+                try:
+                    fm.render.image_settings.file_format = 'OPEN_EXR'
+                    fm.render.image_settings.color_mode = 'RGBA'
+                    fm.render.image_settings.color_depth = '32'
+                    fm.render.filepath = f"{vfx.output_dir}{fm.name}/"
+                except Exception:
+                    pass
+                for vl in fm.view_layers:
+                    try:
+                        vl.use_pass_mist = True
+                    except Exception:
+                        pass
+                n = (fm.frame_end - fm.frame_start + 1)
+                total_frames += n
+                self.steps.append((fm.name, n))
 
         self.total_frames = max(1, total_frames)
         self.step_index = 0
@@ -951,6 +991,14 @@ class VFX_OT_render_all_layers(bpy.types.Operator):
                 master = vfx.master_scene or context.scene
                 vfx.comp_mode = 'FILES'
                 rebuild_comp_from_files(vfx, master)
+                # Auto-calibrate mist from scene geometry after render
+                if getattr(vfx, "use_fog", False):
+                    from .compositor import auto_calibrate_mist
+                    auto_calibrate_mist(vfx, master)
+                    try:
+                        rebuild_comp(vfx, master)
+                    except Exception:
+                        pass
                 vfx.render_status = "Done + comp from EXR"
             except Exception as e:
                 print("VFX post-files error:", e)
@@ -1123,5 +1171,51 @@ class VFX_OT_rebuild_comp(bpy.types.Operator):
         except Exception as e:
             print("VFX rebuild error:", e)
             traceback.print_exc()
+        return {'FINISHED'}
+
+
+class VFX_OT_diagnose(bpy.types.Operator):
+    bl_idname = "vfx.diagnose"
+    bl_label = "Run Diagnostics"
+    bl_description = "Print diagnostic info to Blender console (System Console / Info editor)"
+
+    def execute(self, context):
+        from .diagnostic import diagnose
+        diagnose()
+        self.report({'INFO'}, "Diagnostics printed to console")
+        return {'FINISHED'}
+
+
+class VFX_OT_force_enable_passes(bpy.types.Operator):
+    bl_idname = "vfx.force_enable_passes"
+    bl_label = "Enable All Passes"
+    bl_description = "Force-enable Mist, Z, Normal on all VFX layer scenes"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        from .diagnostic import force_enable_passes
+        force_enable_passes()
+        self.report({'INFO'}, "Passes enabled on all scenes")
+        return {'FINISHED'}
+
+
+class VFX_OT_auto_calibrate_mist(bpy.types.Operator):
+    bl_idname = "vfx.auto_calibrate_mist"
+    bl_label = "Auto-Calibrate Mist"
+    bl_description = "Analyze scene from camera and set mist start/depth to cover all objects"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        from .compositor import auto_calibrate_mist
+        vfx, master = get_project(context, allow_write=True)
+        if auto_calibrate_mist(vfx, master):
+            # Rebuild comp so the fog group picks up new mist values
+            try:
+                rebuild_comp(vfx, master)
+            except Exception:
+                pass
+            self.report({'INFO'}, f"Mist calibrated: start={vfx.mist_start:.2f} depth={vfx.mist_depth:.2f}")
+        else:
+            self.report({'WARNING'}, "Could not calibrate mist — check camera and objects")
         return {'FINISHED'}
 

@@ -4,7 +4,7 @@
 
 - **URL:** https://github.com/neohh/vfx-layer-tools
 - **Владелец:** neohh
-- **Ветка:** `master`
+- **Ветка:** `main`
 
 ## Коммиты
 
@@ -34,7 +34,7 @@ Co-Authored-By: Codebuff <noreply@codebuff.com>
 2. Обновить CHANGELOG.md
 3. Закоммитить изменения
 4. Создать аннотированный тег: `git tag -a vX.Y.Z -m "VFX Layer Tools vX.Y.Z"`
-5. Запушить коммиты и тег: `git push origin master --tags`
+5. Запушить коммиты и тег: `git push origin main --tags`
 6. **Создать zip-архив** (обязательно!)
 7. Создать релиз через `gh release create`
 8. **Прикрепить zip** через `gh release upload`
@@ -87,7 +87,7 @@ git add -A && git commit -m "Release vX.Y.Z"
 git tag -a vX.Y.Z -m "VFX Layer Tools vX.Y.Z"
 
 # 3. Пуш
-git push origin master --tags
+git push origin main --tags
 
 # 4. Создать zip
 python -c "
