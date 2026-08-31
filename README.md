@@ -58,18 +58,47 @@
 ## Структура
 
 ```
-vfx_layer_tools.py      ← основной файл аддона
-archive/                ← исходные 5 версий (архив)
+vfx_layer_tools/            ← пакет аддона (устанавливается как zip)
+├── __init__.py             ← bl_info, Properties, register/unregister (376 строк)
+├── core.py                 ← утилиты, коллекции, сцены, синхронизация (337 строк)
+├── shadow.py               ← shadow catcher, прокси-объекты (188 строк)
+├── compositor.py           ← дерево композитора, сборка нод, fog (1119 строк)
+├── materials.py            ← редактирование материалов (318 строк)
+├── operators.py            ← все операторы (1092 строк)
+└── ui.py                   ← панели и UIList (307 строк)
+archive/                    ← исходные 5 версий (архив)
+```
+
+### Зависимости между модулями
+
+```
+__init__.py  ──→  core, shadow, compositor, materials, operators, ui
+operators.py ──→  core, shadow, compositor, materials
+ui.py         ──→  core, materials
+compositor.py ──→  core, materials
+shadow.py     ──→  core
+materials.py  ──→  (чистый модуль)
+core.py       ──→  (чистый модуль)
 ```
 
 ---
 
 ## Установка
 
-1. Скачайте `vfx_layer_tools.py`
+### Из zip-архива (рекомендуется)
+
+1. Скачайте репозиторий как zip (Code → Download ZIP)
 2. В Blender: **Edit → Preferences → Add-ons → Install**
-3. Выберите скачанный файл
+3. Выберите скачанный zip-файл
 4. Включите аддон — в 3D Viewport появится панель **VFX** в sidebar (N)
+
+### Из папки
+
+1. Скопируйте папку `vfx_layer_tools/` в директорию аддонов Blender:
+   - Windows: `%APPDATA%\Blender Foundation\Blender\5.1\scripts\addons\`
+   - macOS: `~/Library/Application Support/Blender/5.1/scripts/addons/`
+   - Linux: `~/.config/blender/5.1/scripts/addons/`
+2. В Blender: **Edit → Preferences → Add-ons** → найдите "VFX Layer Tools" и включите
 
 ---
 

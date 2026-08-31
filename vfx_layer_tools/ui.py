@@ -1,0 +1,306 @@
+"""VFX Layer Tools — UI panels and list widget."""
+
+import bpy
+
+from . import VFX_VERSION
+from .core import get_project, active_layer
+from .materials import _last_adjust_stats
+
+
+# ---------------------------------------------------------------------
+# UI LIST
+# ---------------------------------------------------------------------
+
+class VFX_UL_layers(bpy.types.UIList):
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        has_shd = bool(item.shadow_scene)
+
+        row = layout.row(align=True)
+        row.prop(item, "enabled", text="")
+
+        if has_shd:
+            tog = row.operator(
+                "vfx.toggle_layer_expand",
+                text="",
+                icon='TRIA_DOWN' if item.expanded else 'TRIA_RIGHT',
+                emboss=False
+            )
+            tog.index = index
+        else:
+            row.label(text="", icon='BLANK1')
+
+        if item.scene:
+            row.label(text=item.layer_name, icon='SCENE_DATA')
+        else:
+            row.label(text=item.layer_name, icon='ERROR')
+
+        rr = row.operator(
+            "vfx.render_all_layers",
+            text="",
+            icon='RENDER_STILL',
+            emboss=False
+        )
+        rr.only_layer = index
+        rr.refresh_after = True
+
+        drag = row.operator(
+            "vfx.drag_layer",
+            text="",
+            icon='GRIP',
+            emboss=False
+        )
+        drag.index = index
+
+        if has_shd and item.expanded:
+            shd_row = layout.row(align=True)
+            shd_row.scale_y = 0.9
+            shd_row.label(text="", icon='BLANK1')
+            shd_row.label(text="", icon='BLANK1')
+            shd_row.label(text="shadow", icon='LIGHT')
+            rr2 = shd_row.operator(
+                "vfx.render_all_layers",
+                text="",
+                icon='RENDER_STILL',
+                emboss=False
+            )
+            rr2.only_shadow_for_layer = index
+            rr2.refresh_after = True
+            shd_row.label(text="", icon='BLANK1')
+
+
+
+
+# ---------------------------------------------------------------------
+# PANEL
+# ---------------------------------------------------------------------
+
+class VFX_PT_main(bpy.types.Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "VFX"
+    bl_label = "VFX Layers"
+
+    def draw(self, context):
+        layout = self.layout
+
+        if not hasattr(context.scene, "vfx"):
+            layout.label(text="VFX props not registered!", icon='ERROR')
+            layout.label(text="Remove old addon, restart Blender")
+            return
+
+        try:
+            self.draw_main(context, layout)
+        except Exception as e:
+            layout.label(text="Panel draw error:", icon='ERROR')
+            layout.label(text=str(e))
+
+    def draw_main(self, context, layout):
+        vfx, master = get_project(context, allow_write=False)
+
+        layout.label(text=f"VFX Layer Tools v{VFX_VERSION}", icon='NODETREE')
+        layout.separator()
+        layout.prop(vfx, "master_scene", text="Master")
+
+        if vfx.master_scene is None:
+            layout.label(text="Master scene not set:", icon='INFO')
+            layout.operator("vfx.set_master")
+
+        layout.operator_context = 'INVOKE_DEFAULT'
+        layout.operator("vfx.create_layer", icon='ADD')
+
+        layout.template_list(
+            "VFX_UL_layers",
+            "",
+            vfx,
+            "layers",
+            vfx,
+            "active_layer_index"
+        )
+
+        # закрепленная строка фона
+        if vfx.bg_scene is not None:
+            bgbox = layout.box()
+            r = bgbox.row(align=True)
+            r.label(text="", icon='WORLD')
+            r.label(text="BACKGROUND (bottom)")
+            rbg = r.operator(
+                "vfx.render_all_layers",
+                text="",
+                icon='RENDER_STILL',
+                emboss=False
+            )
+            rbg.only_background = True
+            rbg.refresh_after = True
+            r.operator("vfx.delete_background", text="", icon='X')
+            if vfx.use_fog:
+                r.prop(vfx, "bg_fog_factor", text="Fog")
+
+        # закрепленная строка тумана
+        fogbox = layout.box()
+        fr = fogbox.row(align=True)
+        fr.operator(
+            "vfx.toggle_fog_expand",
+            text="",
+            icon='TRIA_DOWN' if vfx.fog_expanded else 'TRIA_RIGHT',
+            emboss=False
+        )
+        fr.label(text="FOG", icon='FORCE_WIND')
+        fr.prop(vfx, "use_fog", text="")
+        if vfx.fog_expanded:
+            fb = fogbox.column(align=True)
+            fb.prop(vfx, "mist_start")
+            fb.prop(vfx, "mist_depth")
+            fr2 = fb.row(align=True)
+            fr2.prop(vfx, "ramp_black")
+            fr2.prop(vfx, "ramp_white")
+            fb.prop(vfx, "fog_strength")
+            if vfx.fog_strength > 0.0:
+                fb.prop(vfx, "fog_color", text="")
+            fb.prop(vfx, "fog_preview")
+
+        row = layout.row(align=True)
+        row.operator("vfx.move_layer_up", icon='TRIA_UP', text="Up / Forward")
+        row.operator("vfx.move_layer_down", icon='TRIA_DOWN', text="Down / Back")
+
+        layer = active_layer(vfx)
+
+        if layer:
+            box = layout.box()
+            box.label(text=layer.layer_name, icon='SCENE_DATA')
+
+            row = box.row(align=True)
+            row.operator("vfx.add_selected_to_layer", text="Add Sel")
+            row.operator("vfx.remove_selected_from_layer", text="Remove Sel")
+
+            row = box.row(align=True)
+            row.operator("vfx.rename_layer", text="Rename Layer")
+            row.operator("vfx.delete_layer", text="Delete", icon='X')
+
+            box.prop(layer, "shadow_catcher", text="Catcher")
+
+            row = box.row(align=True)
+            if not layer.shadow_scene:
+                row.operator("vfx.create_shadow_pass", icon='LIGHT')
+            else:
+                row.label(text=f"Shadow pass: {layer.shadow_mode}", icon='CHECKMARK')
+                row.operator("vfx.refresh_proxies", text="", icon='FILE_REFRESH')
+                row.operator("vfx.delete_shadow_pass", text="", icon='X')
+                box.prop(layer, "shadow_strength")
+
+            if vfx.use_fog:
+                box.prop(layer, "fog_factor")
+
+            box.separator()
+            box.prop(layer, "use_adjust")
+            if layer.use_adjust:
+                st = _last_adjust_stats
+                if st["notes"]:
+                    for n in st["notes"]:
+                        box.label(text=n, icon='ERROR')
+                else:
+                    box.label(text=f"{st['applied']}/{st['materials']} materials adjusted", icon='CHECKMARK')
+                adj = box.column(align=True)
+                adj.prop(layer, "exposure")
+                adj.prop(layer, "contrast")
+                adj.prop(layer, "saturation")
+                adj.prop(layer, "tint_strength")
+                if layer.tint_strength > 0.0:
+                    adj.prop(layer, "tint_color", text="")
+                adj.operator("vfx.reset_lighting", icon='LOOP_BACK')
+
+        layout.separator()
+        layout.prop(vfx, "output_dir", text="Output")
+
+        layout.operator(
+            "vfx.one_click_exr",
+            text="1-Click: Render EXR + Comp",
+            icon='FILE_IMAGE'
+        )
+
+        if vfx.render_running:
+            bar = layout.column(align=True)
+            bar.scale_y = 2.5
+            bar.prop(vfx, "render_progress", slider=True, text="")
+            layout.label(text=vfx.render_status, icon='RENDER_ANIMATION')
+            layout.label(text="ESC - stop render", icon='INFO')
+
+        layout.separator(factor=1.5)
+
+        row = layout.row(align=True)
+        row.prop(vfx, "objects_engine", text="Obj")
+        row.prop(vfx, "shadows_engine", text="Shd")
+
+        layout.operator("vfx.rebuild_comp", text="Rebuild Comp", icon='FILE_REFRESH')
+
+        # GLOW / GLARE
+        glowbox = layout.box()
+        gr = glowbox.row(align=True)
+        gr.prop(vfx, "use_glare", text="")
+        gr.label(text="GLOW / GLARE", icon='LIGHT_SUN')
+        if vfx.use_glare:
+            gc = glowbox.column(align=True)
+            gc.prop(vfx, "glare_type", text="")
+            gc.prop(vfx, "glare_strength")
+            gc.prop(vfx, "glare_threshold")
+            gc.prop(vfx, "glare_size")
+
+        # DEPTH / BLUR: атмосферный + камерный
+        depthbox = layout.box()
+        depthbox.label(text="DEPTH / BLUR", icon='CAMERA_DATA')
+
+        da = depthbox.column(align=True)
+        da.prop(vfx, "use_blur")
+        if vfx.use_blur:
+            da.prop(vfx, "blur_size")
+            dr = da.row(align=True)
+            dr.prop(vfx, "blur_ramp_black")
+            dr.prop(vfx, "blur_ramp_white")
+
+        depthbox.separator()
+
+        dd = depthbox.column(align=True)
+        dd.prop(vfx, "use_dof")
+        if vfx.use_dof:
+            dd.prop(vfx, "dof_fstop")
+            dd.prop(vfx, "dof_focus")
+            dd.prop(vfx, "dof_maxblur")
+
+        # LENS DISTORTION
+        ldbox = layout.box()
+        lbw = ldbox.row(align=True)
+        lbw.prop(vfx, "use_lensdist", text="")
+        lbw.label(text="LENS DISTORTION", icon='VIEW_CAMERA')
+        if vfx.use_lensdist:
+            lc = ldbox.column(align=True)
+            lc.prop(vfx, "lensdist_distort")
+            lc.prop(vfx, "lensdist_disperse")
+
+
+# ---------------------------------------------------------------------
+# PANEL (COMPOSITOR)
+# ---------------------------------------------------------------------
+
+class VFX_PT_compositor(bpy.types.Panel):
+    bl_space_type = 'NODE_EDITOR'
+    bl_region_type = 'UI'
+    bl_category = "VFX"
+    bl_label = "VFX Layers"
+
+    @classmethod
+    def poll(cls, context):
+        sd = context.space_data
+        return sd is not None and getattr(sd, "tree_type", "") == 'CompositorNodeTree'
+
+    def draw(self, context):
+        layout = self.layout
+
+        if not hasattr(context.scene, "vfx"):
+            layout.label(text="VFX props not registered!", icon='ERROR')
+            return
+
+        try:
+            VFX_PT_main.draw_main(self, context, layout)
+        except Exception as e:
+            layout.label(text="Panel draw error:", icon='ERROR')
+            layout.label(text=str(e))
+
