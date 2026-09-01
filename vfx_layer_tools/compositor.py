@@ -868,7 +868,7 @@ def build_comp_assembly(vfx, master, nt=None):
             mix.name = f"VFX_MIX_{mix_index:02d}"
             mix.label = f"{layer.layer_name} {kind}"
             mix["vfx_mix"] = 1
-            mix.location = (500, -mix_index * 200)
+            mix.location = (800, -mix_index * 200)
 
             img = [s for s in mix.inputs if s.type == 'RGBA']
             fac = [s for s in mix.inputs if s.type == 'VALUE']
@@ -894,24 +894,38 @@ def build_comp_assembly(vfx, master, nt=None):
             current = outs[0] if outs else mix.outputs[0]
             mix_index += 1
 
-    # ── ATMOSPHERIC BLUR ──
-    _remove_nodes(nt, "VFX_BLUR", "VFX_BLURRAMP", "VFX_BLURMATH")
+    # ── POST-EFFECTS: horizontal chain ──
+    # Layout: x=800 sources/mix → x=1100 blur → x=1400 DOF → x=1700 glare → x=2000 lensdist → x=2300 output
+    # Each effect: find-or-create (safe, no _remove_nodes before creation)
+
+    _PX_SRC = 800    # source / mix column
+    _PX_BLUR = 1100  # blur chain
+    _PX_DOF = 1400   # depth of field
+    _PX_GLARE = 1700 # glare / bloom
+    _PX_LD = 2000    # lens distortion
+    _PX_OUT = 2300   # composite / viewer
+    _PY = 0          # main chain y
+
+    # ── ATMOSPHERIC BLUR (ramp → math → blur, horizontal) ──
     if getattr(vfx, "use_blur", False):
         try:
             _ensure_fogmap(nt, vfx, master)
             mist_b = _get_mist_socket(nt)
             if mist_b is not None:
-                # Ramp: remap mist to blur mask
-                mr = _new_node(nt, "CompositorNodeMapRange")
+                # Ramp: remap mist → blur mask
+                mr = nt.nodes.get("VFX_BLURRAMP")
+                if mr is None:
+                    mr = _new_node(nt, "CompositorNodeMapRange",
+                                   "ShaderNodeMapRange")
+                    if mr is not None:
+                        mr.name = "VFX_BLURRAMP"
+                        mr.label = "BLUR RAMP"
                 if mr is not None:
-                    mr.name = "VFX_BLURRAMP"
-                    mr.label = "BLUR RAMP"
-                    mr.location = (800, 100)
+                    mr.location = (_PX_BLUR - 200, _PY + 200)
                     try:
                         mr.interpolation_type = 'SMOOTHSTEP'
                     except Exception:
                         pass
-                    _safe_set(mr, "Value", 0)  # clear default
                     v_in = mr.inputs.get("Value")
                     if v_in is not None:
                         for l in list(v_in.links):
@@ -920,12 +934,16 @@ def build_comp_assembly(vfx, master, nt=None):
                     _safe_set(mr, "From Min", vfx.blur_ramp_black)
                     _safe_set(mr, "From Max", vfx.blur_ramp_white)
 
-                # Math: multiply mask × blur_size
-                bm = _new_node(nt, "CompositorNodeMath")
+                # Math: mask × blur_size
+                bm = nt.nodes.get("VFX_BLURMATH")
+                if bm is None:
+                    bm = _new_node(nt, "CompositorNodeMath",
+                                   "ShaderNodeMath")
+                    if bm is not None:
+                        bm.name = "VFX_BLURMATH"
+                        bm.label = "BLUR SIZE"
                 if bm is not None:
-                    bm.name = "VFX_BLURMATH"
-                    bm.label = "BLUR SIZE"
-                    bm.location = (1000, 100)
+                    bm.location = (_PX_BLUR, _PY + 200)
                     bm.operation = 'MULTIPLY'
                     bm.inputs[1].default_value = vfx.blur_size
                     if mr is not None and mr.outputs.get("Result"):
@@ -934,11 +952,16 @@ def build_comp_assembly(vfx, master, nt=None):
                         nt.links.new(mr.outputs["Result"], bm.inputs[0])
 
                 # Blur node
-                bl = _new_node(nt, "CompositorNodeBlur")
+                bl = nt.nodes.get("VFX_BLUR")
+                if bl is None:
+                    try:
+                        bl = nt.nodes.new("CompositorNodeBlur")
+                        bl.name = "VFX_BLUR"
+                        bl.label = "ATMO BLUR"
+                    except Exception:
+                        bl = None
                 if bl is not None:
-                    bl.name = "VFX_BLUR"
-                    bl.label = "ATMO BLUR"
-                    bl.location = (1200, 100)
+                    bl.location = (_PX_BLUR, _PY)
                     try:
                         bl.use_variable_size = True
                     except Exception:
@@ -961,20 +984,26 @@ def build_comp_assembly(vfx, master, nt=None):
                         current = bl.outputs[0]
         except Exception as e:
             print("VFX blur error:", e)
+    else:
+        # Clean up blur nodes when disabled
+        _remove_nodes(nt, "VFX_BLUR", "VFX_BLURRAMP", "VFX_BLURMATH")
 
     # ── CAMERA DOF ──
-    _remove_nodes(nt, "VFX_DOF")
     if getattr(vfx, "use_dof", False):
         try:
             _ensure_fogmap(nt, vfx, master)
             fmn = nt.nodes.get("VFX_RL_FOGMAP")
             if fmn is not None and fmn.outputs.get("Depth"):
-                df = _new_node(nt, "CompositorNodeDefocus")
+                df = nt.nodes.get("VFX_DOF")
+                if df is None:
+                    try:
+                        df = nt.nodes.new("CompositorNodeDefocus")
+                        df.name = "VFX_DOF"
+                        df.label = "CAMERA DOF"
+                    except Exception:
+                        df = None
                 if df is not None:
-                    df.name = "VFX_DOF"
-                    df.label = "CAMERA DOF"
-                    df.location = (1200, -200)
-                    # Set properties via attr + input socket fallback
+                    df.location = (_PX_DOF, _PY)
                     for attr, val in (("fstop", vfx.dof_fstop),
                                       ("f_stop", vfx.dof_fstop)):
                         _safe_set(df, attr, val)
@@ -985,7 +1014,6 @@ def build_comp_assembly(vfx, master, nt=None):
                     for attr, val in (("blur_max", vfx.dof_maxblur),
                                       ("max_blur", vfx.dof_maxblur)):
                         _safe_set(df, attr, val)
-                    # Inputs
                     img_in = df.inputs.get("Image")
                     z_in = df.inputs.get("Z")
                     if img_in is not None:
@@ -1000,16 +1028,21 @@ def build_comp_assembly(vfx, master, nt=None):
                         current = df.outputs[0]
         except Exception as e:
             print("VFX dof error:", e)
+    else:
+        _remove_nodes(nt, "VFX_DOF")
 
     # ── GLOW / GLARE ──
-    _remove_nodes(nt, "VFX_GLARE")
     if getattr(vfx, "use_glare", False):
-        gl = _new_node(nt, "CompositorNodeGlare")
+        gl = nt.nodes.get("VFX_GLARE")
+        if gl is None:
+            try:
+                gl = nt.nodes.new("CompositorNodeGlare")
+                gl.name = "VFX_GLARE"
+                gl.label = "GLARE"
+            except Exception:
+                gl = None
         if gl is not None:
-            gl.name = "VFX_GLARE"
-            gl.label = "GLARE"
-            gl.location = (1200, -400)
-            # Set glare type — try every possible attr + value combo
+            gl.location = (_PX_GLARE, _PY)
             type_set = False
             for attr in ("glare_type", "type", "mode"):
                 if type_set:
@@ -1021,14 +1054,11 @@ def build_comp_assembly(vfx, master, nt=None):
                         break
                     except Exception:
                         pass
-            # threshold + size — try attr, then input socket
             _safe_set(gl, "threshold", vfx.glare_threshold)
             _safe_set(gl, "size", vfx.glare_size)
-            # Map glare_strength (0..5) → mix (1.0..-1.0)
             mix_val = 1.0 - (vfx.glare_strength / 2.5)
             mix_val = max(-1.0, min(1.0, mix_val))
             _safe_set(gl, "mix", mix_val)
-            # Input: image
             if gl.inputs:
                 gin_s = gl.inputs[0]
                 for l in list(gin_s.links):
@@ -1036,15 +1066,21 @@ def build_comp_assembly(vfx, master, nt=None):
                 nt.links.new(current, gin_s)
             if gl.outputs:
                 current = gl.outputs[0]
+    else:
+        _remove_nodes(nt, "VFX_GLARE")
 
     # ── LENS DISTORTION ──
-    _remove_nodes(nt, "VFX_LENSDIST")
     if getattr(vfx, "use_lensdist", False):
-        ld = _new_node(nt, "CompositorNodeLensdist")
+        ld = nt.nodes.get("VFX_LENSDIST")
+        if ld is None:
+            try:
+                ld = nt.nodes.new("CompositorNodeLensdist")
+                ld.name = "VFX_LENSDIST"
+                ld.label = "LENS DIST"
+            except Exception:
+                ld = None
         if ld is not None:
-            ld.name = "VFX_LENSDIST"
-            ld.label = "LENS DIST"
-            ld.location = (1200, -600)
+            ld.location = (_PX_LD, _PY)
             _safe_set(ld, "distort", vfx.lensdist_distort)
             _safe_set(ld, "dispersion", vfx.lensdist_disperse)
             img_in = ld.inputs.get("Image")
@@ -1056,6 +1092,8 @@ def build_comp_assembly(vfx, master, nt=None):
                 nt.links.new(current, img_in)
             if ld.outputs:
                 current = ld.outputs[0]
+    else:
+        _remove_nodes(nt, "VFX_LENSDIST")
 
     comp = None
     for node in nt.nodes:
@@ -1069,7 +1107,7 @@ def build_comp_assembly(vfx, master, nt=None):
                     "NodeComposite"):
             try:
                 comp = nt.nodes.new(bid)
-                comp.location = (1600, 0)
+                comp.location = (_PX_OUT, _PY)
                 break
             except Exception:
                 comp = None
@@ -1093,7 +1131,7 @@ def build_comp_assembly(vfx, master, nt=None):
             except Exception:
                 pass
             gout = nt.nodes.new("NodeGroupOutput")
-            gout.location = (1600, -250)
+            gout.location = (_PX_OUT, _PY - 250)
         if gout is not None and len(gout.inputs) > 0:
             nt.links.new(current, gout.inputs[0])
     except Exception:
