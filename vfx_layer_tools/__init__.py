@@ -479,7 +479,10 @@ def register():
     unregister()
 
     for cls in classes:
-        bpy.utils.register_class(cls)
+        try:
+            bpy.utils.register_class(cls)
+        except RuntimeError:
+            pass  # already registered during auto-reload
 
     bpy.types.Scene.vfx = PointerProperty(type=VFXProject)
 
