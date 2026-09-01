@@ -27,6 +27,7 @@ def _trigger_rebuild(context):
 
 def _trigger_comp(context):
     try:
+        from .compositor import build_comp_assembly
         scene = context.scene
         vfx = scene.vfx
         master = vfx.master_scene or scene
@@ -34,8 +35,8 @@ def _trigger_comp(context):
         for window in bpy.context.window_manager.windows:
             for area in window.screen.areas:
                 area.tag_redraw()
-    except Exception:
-        pass
+    except Exception as e:
+        print("VFX _trigger_comp error:", e)
 
 
 def _find_bsdf(mat):

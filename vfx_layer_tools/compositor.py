@@ -469,6 +469,7 @@ def _get_mist_socket(nt):
 
 
 def _cleanup_fog_nodes(nt):
+    """Remove all VFX_FOG* nodes except VFX_FOG_GROUP (which is managed by build_comp_assembly)."""
     for node in list(nt.nodes):
         n = node.name
         if n == "VFX_FOG_GROUP":
@@ -685,6 +686,12 @@ def build_comp_assembly(vfx, master, nt=None):
     for node in list(nt.nodes):
         if node.get("vfx_mix"):
             nt.nodes.remove(node)
+
+    # If fog is OFF, remove the old fog group node entirely
+    if not getattr(vfx, "use_fog", False):
+        fg = nt.nodes.get("VFX_FOG_GROUP")
+        if fg is not None:
+            nt.nodes.remove(fg)
 
     _cleanup_fog_nodes(nt)
 
