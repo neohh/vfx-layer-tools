@@ -431,18 +431,19 @@ CLASS_NAMES = tuple(cls.__name__ for cls in classes)
 
 
 # ---------------------------------------------------------------------
-# AUTO-RELOAD (dev convenience — soft reload, keeps Scene.vfx data)
+# AUTO-RELOAD (dev convenience)
 # ---------------------------------------------------------------------
 
 _AUTO_RELOAD_ENABLED = True
 _AUTO_RELOAD_INTERVAL = 2  # seconds
 _FILE_TIMESTAMPS = {}
 _AUTO_RELOAD_FIRST_RUN = True
+_IN_RELOAD = False  # flag: don't destroy Scene.vfx during auto-reload
 
 
 def _auto_reload_timer():
-    """Check source files for changes; soft-reload without losing data."""
-    global _AUTO_RELOAD_FIRST_RUN, CLASS_NAMES
+    """Check source files for changes; reload changed modules."""
+    global _AUTO_RELOAD_FIRST_RUN, _IN_RELOAD
 
     if not _AUTO_RELOAD_ENABLED:
         return None
@@ -469,89 +470,39 @@ def _auto_reload_timer():
     if changed_files:
         print(f"VFX auto-reload: changed {', '.join(changed_files)}")
         try:
-            _soft_reload()
+            _IN_RELOAD = True
+            unregister()
+
+            # Reload every vfx_layer_tools.* module
+            to_reload = [n for n in list(sys.modules) if n.startswith("vfx_layer_tools")]
+            for mod_name in to_reload:
+                mod = sys.modules.get(mod_name)
+                if mod is not None:
+                    try:
+                        importlib.reload(mod)
+                    except Exception as exc:
+                        print(f"  reload error {mod_name}: {exc}")
+
+            register()
+            _IN_RELOAD = False
             print("VFX auto-reload: done")
         except Exception as exc:
+            _IN_RELOAD = False
             print(f"VFX auto-reload failed: {exc}")
 
     return _AUTO_RELOAD_INTERVAL
 
 
-def _soft_reload():
-    """Reload modules and re-register classes WITHOUT destroying Scene.vfx."""
-    global CLASS_NAMES
-
-    old_names = set(CLASS_NAMES)
-
-    # 1. Reload every vfx_layer_tools.* module in place
-    to_reload = [n for n in list(sys.modules) if n.startswith("vfx_layer_tools")]
-    for mod_name in to_reload:
-        mod = sys.modules.get(mod_name)
-        if mod is not None:
-            try:
-                importlib.reload(mod)
-            except Exception as exc:
-                print(f"  reload error {mod_name}: {exc}")
-
-    # 2. Grab new class list from reloaded __init__
-    vfx_mod = sys.modules.get("vfx_layer_tools")
-    if vfx_mod is None:
-        return
-    new_names = tuple(getattr(vfx_mod, "CLASS_NAMES", old_names))
-    new_classes_dict = getattr(vfx_mod, "classes", None)
-    new_names_set = set(new_names)
-
-    # 3. Unregister classes that were removed or changed
-    for name in old_names:
-        if name not in new_names_set:
-            old_cls = getattr(bpy.types, name, None)
-            if old_cls is not None:
-                try:
-                    bpy.utils.unregister_class(old_cls)
-                except Exception:
-                    pass
-
-    # 4. Unregister + re-register classes that exist in both old and new
-    for name in old_names & new_names_set:
-        old_cls = getattr(bpy.types, name, None)
-        if old_cls is not None:
-            try:
-                bpy.utils.unregister_class(old_cls)
-            except Exception:
-                pass
-
-    # 5. Register all classes from the new module
-    if new_classes_dict is not None:
-        for cls in new_classes_dict:
-            if not hasattr(bpy.types, cls.__name__):
-                try:
-                    bpy.utils.register_class(cls)
-                except Exception as exc:
-                    print(f"  register error {cls.__name__}: {exc}")
-    else:
-        for name in new_names:
-            cls = getattr(vfx_mod, name, None)
-            if cls is not None and not hasattr(bpy.types, name):
-                try:
-                    bpy.utils.register_class(cls)
-                except Exception as exc:
-                    print(f"  register error {name}: {exc}")
-
-    CLASS_NAMES = new_names
-    # Force UI redraw
-    for window in bpy.context.window_manager.windows:
-        for area in window.screen.areas:
-            area.tag_redraw()
-
-
 def unregister():
+    global _IN_RELOAD
     # stop auto-reload timer
     try:
         bpy.app.timers.unregister(_auto_reload_timer)
     except Exception:
         pass
 
-    if hasattr(bpy.types.Scene, "vfx"):
+    # Only destroy Scene.vfx on FULL unregister (not during auto-reload)
+    if not _IN_RELOAD and hasattr(bpy.types.Scene, "vfx"):
         try:
             del bpy.types.Scene.vfx
         except Exception:
