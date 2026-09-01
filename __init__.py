@@ -516,8 +516,6 @@ classes = (
     VFX_OT_diagnostic,
     VFX_OT_setup_light_groups,
     VFX_OT_apply_color_preset,
-    VFX_OT_setup_light_groups,
-    VFX_OT_apply_color_preset,
     VFX_PT_main,
     VFX_PT_post_effects,
     VFX_PT_compositor,
