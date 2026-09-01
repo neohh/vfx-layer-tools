@@ -24,3 +24,7 @@ Thumbs.db
 
 # Archives (keep only source)
 *.zip
+
+# VFX addon temp
+*.tmp
+.vfx_layer_tools.~temp~
