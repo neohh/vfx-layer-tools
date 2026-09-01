@@ -8,6 +8,9 @@ from .core import (
     create_empty_scene, sync_scene_settings,
 )
 from .materials import _trigger_comp
+from .cryptomatte import add_cryptomatte_nodes, setup_cryptomatte_for_layers
+from .colormatch import get_or_create_color_match_group, apply_preset
+from .lightgroups import add_light_group_output_nodes
 
 
 def _find_comp_tree_attr(master):
@@ -915,7 +918,7 @@ def build_comp_assembly(vfx, master, nt=None):
             # Glare TYPE is a MENU input socket, not a node property
             _set_glare_type(gl, vfx.glare_type)
 
-            # Threshold, Size, Strength — all via input sockets
+            # Threshold, Size, Strength â€” all via input sockets
             _set_socket(gl, "Threshold", vfx.glare_threshold)
             _set_socket(gl, "Size", vfx.glare_size)
             _set_socket(gl, "Strength", vfx.glare_strength)
@@ -952,6 +955,63 @@ def build_comp_assembly(vfx, master, nt=None):
                 current = ld.outputs[0]
     else:
         _remove_nodes(nt, "VFX_LENSDIST")
+
+    # Light Groups: combine LG outputs
+    if getattr(vfx, "use_light_groups", False):
+        try:
+            add_light_group_output_nodes(vfx, master, nt)
+        except Exception as e:
+            print("VFX light groups error:", e)
+
+    # Cryptomatte: add crypto nodes
+    if getattr(vfx, "use_cryptomatte", False):
+        try:
+            setup_cryptomatte_for_layers(vfx, master)
+            add_cryptomatte_nodes(vfx, master, nt)
+        except Exception as e:
+            print("VFX cryptomatte error:", e)
+
+    # Color Match: plate matching node group
+    if getattr(vfx, "use_color_match", False):
+        try:
+            cm_ng = get_or_create_color_match_group()
+            preset = getattr(vfx, "color_match_preset", "NONE")
+            strength = getattr(vfx, "color_match_strength", 1.0)
+            if preset != 'NONE':
+                apply_preset(cm_ng, preset, strength)
+
+            cm_node = nt.nodes.get("VFX_COLORMATCH")
+            if cm_node is None:
+                for bid in ("CompositorNodeGroup", "ShaderNodeGroup", "NodeGroup"):
+                    try:
+                        cm_node = nt.nodes.new(bid)
+                        break
+                    except Exception:
+                        continue
+                if cm_node is not None:
+                    cm_node.name = "VFX_COLORMATCH"
+                    cm_node.label = "COLOR MATCH"
+                    cm_node["vfx_colormatch"] = 1
+            if cm_node is not None:
+                cm_node.node_tree = cm_ng
+                cm_node.location = (_PX_OUT - 300, _PY - 100)
+                img_in = None
+                for s in cm_node.inputs:
+                    if s.type == 'RGBA':
+                        img_in = s
+                        break
+                if img_in is not None:
+                    for l in list(img_in.links):
+                        nt.links.remove(l)
+                    nt.links.new(current, img_in)
+                for s in cm_node.outputs:
+                    if s.type == 'RGBA':
+                        current = s
+                        break
+        except Exception as e:
+            print("VFX color match error:", e)
+    else:
+        _remove_nodes(nt, "VFX_COLORMATCH")
 
     comp = None
     for node in nt.nodes:

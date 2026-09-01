@@ -157,6 +157,42 @@ def _draw_post_effects(context, layout):
         lc.prop(vfx, "lensdist_disperse")
 
 
+def _draw_advanced_features(context, layout):
+    """Draw advanced features: Cryptomatte, Color Match, Light Groups."""
+    vfx, master = get_project(context, allow_write=False)
+
+    # Cryptomatte
+    box = layout.box()
+    bh = box.row(align=True)
+    bh.prop(vfx, "use_cryptomatte", text="")
+    bh.label(text="CRYPTOMATTE", icon='RESTRICT_SELECT_OFF')
+    if vfx.use_cryptomatte:
+        box.label(text="Auto-enabled on all layer scenes", icon='INFO')
+        box.label(text="Use eyedropper in compositor to pick objects", icon='INFO')
+
+    # Color Match
+    box = layout.box()
+    bh = box.row(align=True)
+    bh.prop(vfx, "use_color_match", text="")
+    bh.label(text="COLOR MATCH / PLATE", icon='COLOR')
+    if vfx.use_color_match:
+        box.prop(vfx, "color_match_preset", text="Preset")
+        box.prop(vfx, "color_match_strength", text="Strength")
+        row = box.row(align=True)
+        for preset_id in ('WARM', 'TEAL_ORANGE', 'COOL', 'FILM'):
+            op = row.operator("vfx.apply_color_preset", text=preset_id.replace('_', ' ').title())
+            op.preset = preset_id
+
+    # Light Groups
+    box = layout.box()
+    bh = box.row(align=True)
+    bh.prop(vfx, "use_light_groups", text="")
+    bh.label(text="LIGHT GROUPS", icon='LIGHT')
+    if vfx.use_light_groups:
+        box.operator("vfx.setup_light_groups", icon='LIGHT')
+        box.label(text="Auto-assigns Key/Fill/Rim/Env", icon='INFO')
+
+
 def _draw_render_settings(context, layout):
     vfx, master = get_project(context, allow_write=False)
     layout.separator()
@@ -175,6 +211,9 @@ def _draw_render_settings(context, layout):
     row = layout.row(align=True)
     row.operator("vfx.rebuild_comp", text="Rebuild Comp", icon='FILE_REFRESH')
     row.operator("vfx.diagnostic", text="Diagnostic", icon='CONSOLE')
+
+    layout.separator()
+    _draw_advanced_features(context, layout)
 
 
 class VFX_PT_main(bpy.types.Panel):

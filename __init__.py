@@ -1,14 +1,14 @@
 bl_info = {
     "name": "VFX Layer Tools",
     "author": "VFX Pipeline",
-    "version": (2, 3, 0),
+    "version": (2, 4, 0),
     "blender": (5, 1, 0),
     "location": "View3D > Sidebar > VFX",
     "description": "VFX layer / scene / compositing manager",
     "category": "Compositing",
 }
 
-VFX_VERSION = "2.3.0"
+VFX_VERSION = "2.4.0"
 
 import bpy
 import gc
@@ -357,6 +357,88 @@ class VFXProject(bpy.types.PropertyGroup):
         update=lambda s, c: _trigger_comp(c)
     )
 
+    # Cryptomatte
+    use_cryptomatte: BoolProperty(
+        name="Cryptomatte",
+        description="Enable Cryptomatte Object + Material passes for masking",
+        default=False,
+        update=lambda s, c: _trigger_comp(c)
+    )
+
+    # Color Match / Plate Matching
+    use_color_match: BoolProperty(
+        name="Color Match",
+        description="Enable color correction (plate matching)",
+        default=False,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    color_match_preset: EnumProperty(
+        name="Preset",
+        items=(
+            ('NONE', "Off", "No color correction"),
+            ('WARM', "Warm", "Add warmth to the image"),
+            ('TEAL_ORANGE', "Teal & Orange", "Cinematic teal/orange look"),
+            ('COOL', "Cool", "Cool blue tones"),
+            ('FILM', "Film", "Desaturated film look"),
+        ),
+        default='NONE',
+        update=lambda s, c: _trigger_comp(c)
+    )
+    color_match_strength: FloatProperty(
+        name="Strength", default=1.0, min=0.0, max=2.0,
+        description="Blend between original and color-corrected",
+        update=lambda s, c: _trigger_comp(c)
+    )
+
+    # Light Groups
+    use_light_groups: BoolProperty(
+        name="Light Groups",
+        description="Enable light group passes for per-light control in comp",
+        default=False,
+        update=lambda s, c: _trigger_comp(c)
+    )
+
+    # Cryptomatte
+    use_cryptomatte: BoolProperty(
+        name="Cryptomatte",
+        description="Enable Cryptomatte Object + Material passes for masking",
+        default=False,
+        update=lambda s, c: _trigger_comp(c)
+    )
+
+    # Color Match / Plate Matching
+    use_color_match: BoolProperty(
+        name="Color Match",
+        description="Enable color correction (plate matching)",
+        default=False,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    color_match_preset: EnumProperty(
+        name="Preset",
+        items=(
+            ('NONE', "Off", "No color correction"),
+            ('WARM', "Warm", "Add warmth to the image"),
+            ('TEAL_ORANGE', "Teal & Orange", "Cinematic teal/orange look"),
+            ('COOL', "Cool", "Cool blue tones"),
+            ('FILM', "Film", "Desaturated film look"),
+        ),
+        default='NONE',
+        update=lambda s, c: _trigger_comp(c)
+    )
+    color_match_strength: FloatProperty(
+        name="Strength", default=1.0, min=0.0, max=2.0,
+        description="Blend between original and color-corrected",
+        update=lambda s, c: _trigger_comp(c)
+    )
+
+    # Light Groups
+    use_light_groups: BoolProperty(
+        name="Light Groups",
+        description="Enable light group passes for per-light control in comp",
+        default=False,
+        update=lambda s, c: _trigger_comp(c)
+    )
+
 
 # ---------------------------------------------------------------------
 # SUBMODULE IMPORTS
@@ -386,6 +468,18 @@ from .operators import (
 from .ui import (
     VFX_UL_layers, VFX_PT_main, VFX_PT_post_effects,
     VFX_PT_compositor, VFX_PT_compositor_effects,
+)
+from .cryptomatte import setup_cryptomatte_for_layers, add_cryptomatte_nodes
+from .colormatch import get_or_create_color_match_group, apply_preset
+from .lightgroups import (
+    auto_assign_light_groups, enable_light_groups_on_view_layer,
+    add_light_group_output_nodes,
+)
+from .cryptomatte import setup_cryptomatte_for_layers, add_cryptomatte_nodes
+from .colormatch import get_or_create_color_match_group, apply_preset
+from .lightgroups import (
+    auto_assign_light_groups, enable_light_groups_on_view_layer,
+    add_light_group_output_nodes,
 )
 
 
@@ -420,6 +514,10 @@ classes = (
     VFX_OT_delete_shadow_pass,
     VFX_OT_refresh_proxies,
     VFX_OT_diagnostic,
+    VFX_OT_setup_light_groups,
+    VFX_OT_apply_color_preset,
+    VFX_OT_setup_light_groups,
+    VFX_OT_apply_color_preset,
     VFX_PT_main,
     VFX_PT_post_effects,
     VFX_PT_compositor,

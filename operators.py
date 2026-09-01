@@ -908,3 +908,49 @@ class VFX_OT_rebuild_comp(bpy.types.Operator):
             print("VFX rebuild error:", e)
             traceback.print_exc()
         return {'FINISHED'}
+
+
+
+class VFX_OT_setup_light_groups(bpy.types.Operator):
+    bl_idname = "vfx.setup_light_groups"
+    bl_label = "Setup Light Groups"
+    bl_description = "Auto-assign lights to groups (Key/Fill/Rim/Env) based on direction"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=True)
+        count = auto_assign_light_groups(vfx, master)
+        enable_light_groups_on_view_layer(master)
+        for layer in vfx.layers:
+            if layer.scene:
+                enable_light_groups_on_view_layer(layer.scene)
+            if layer.shadow_scene:
+                enable_light_groups_on_view_layer(layer.shadow_scene)
+        self.report({'INFO'}, f"Light groups: {count} lights assigned")
+        return {'FINISHED'}
+
+
+class VFX_OT_apply_color_preset(bpy.types.Operator):
+    bl_idname = "vfx.apply_color_preset"
+    bl_label = "Apply Color Preset"
+    bl_description = "Apply a color correction preset to the comp"
+
+    preset: bpy.props.EnumProperty(
+        name="Preset",
+        items=(
+            ('NONE', "Off", ""),
+            ('WARM', "Warm", ""),
+            ('TEAL_ORANGE', "Teal & Orange", ""),
+            ('COOL', "Cool", ""),
+            ('FILM', "Film", ""),
+        ),
+        default='NONE'
+    )
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=True)
+        vfx.color_match_preset = self.preset
+        vfx.use_color_match = self.preset != 'NONE'
+        _trigger_comp(context)
+        self.report({'INFO'}, f"Color preset: {self.preset}")
+        return {'FINISHED'}
