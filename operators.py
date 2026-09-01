@@ -23,6 +23,7 @@ from .compositor import (
     _setup_fog_passes, _ensure_fogmap, _get_mist_socket,
 )
 from .materials import _trigger_rebuild, _trigger_comp, update_layer_material_adjust
+from .lightgroups import auto_assign_light_groups, enable_light_groups_on_view_layer
 
 
 class VFX_OT_reset_lighting(bpy.types.Operator):
