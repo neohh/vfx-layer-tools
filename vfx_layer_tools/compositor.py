@@ -844,7 +844,7 @@ def build_comp_assembly(vfx, master, nt=None):
                 if oi is not None:
                     current = oi
                     fog_done = True
-                if getattr(vfx, "mask_source", 'NONE') == 'FOG':
+                if getattr(vfx, "use_mask", False) and getattr(vfx, "mask_source", 'NONE') == 'FOG':
                     om = gnode.outputs.get("Mask")
                     if om is not None:
                         view_sock = om
@@ -983,7 +983,7 @@ def build_comp_assembly(vfx, master, nt=None):
                     if bl.outputs:
                         current = bl.outputs[0]
                     # Mask routing: show blur mask if selected
-                    if getattr(vfx, 'mask_source', 'NONE') == 'BLUR' \
+                    if getattr(vfx, 'use_mask', False) and getattr(vfx, 'mask_source', 'NONE') == 'BLUR' \
                             and mr is not None:
                         view_sock = mr.outputs.get("Result")
         except Exception as e:
@@ -1031,7 +1031,7 @@ def build_comp_assembly(vfx, master, nt=None):
                     if df.outputs:
                         current = df.outputs[0]
                     # Mask routing: show depth mask if selected
-                    if getattr(vfx, 'mask_source', 'NONE') == 'DOF' \
+                    if getattr(vfx, 'use_mask', False) and getattr(vfx, 'mask_source', 'NONE') == 'DOF' \
                             and fmn is not None:
                         view_sock = fmn.outputs.get("Depth")
         except Exception as e:
@@ -1039,39 +1039,33 @@ def build_comp_assembly(vfx, master, nt=None):
     else:
         _remove_nodes(nt, "VFX_DOF")
 
-    # ── GLOW / GLARE ──
+    # ── GLOW / GLARE (always recreate for guaranteed sync) ──
     if getattr(vfx, "use_glare", False):
-        gl = nt.nodes.get("VFX_GLARE")
-        if gl is None:
-            try:
-                gl = nt.nodes.new("CompositorNodeGlare")
-                gl.name = "VFX_GLARE"
-                gl.label = "GLARE"
-            except Exception:
-                gl = None
+        old_gl = nt.nodes.get("VFX_GLARE")
+        if old_gl is not None:
+            nt.nodes.remove(old_gl)
+        gl = _new_node(nt, "CompositorNodeGlare")
         if gl is not None:
+            gl.name = "VFX_GLARE"
+            gl.label = "GLARE"
             gl.location = (_PX_GLARE, _PY)
-            type_set = False
+            # Type: try every attr × value combo
             for attr in ("glare_type", "type", "mode"):
-                if type_set:
-                    break
                 for val in (vfx.glare_type, vfx.glare_type.lower()):
                     try:
                         setattr(gl, attr, val)
-                        type_set = True
                         break
                     except Exception:
                         pass
+            # Properties via attr
             _safe_set(gl, "threshold", vfx.glare_threshold)
             _safe_set(gl, "size", vfx.glare_size)
             mix_val = 1.0 - (vfx.glare_strength / 2.5)
             mix_val = max(-1.0, min(1.0, mix_val))
             _safe_set(gl, "mix", mix_val)
+            # Connect image input
             if gl.inputs:
-                gin_s = gl.inputs[0]
-                for l in list(gin_s.links):
-                    nt.links.remove(l)
-                nt.links.new(current, gin_s)
+                nt.links.new(current, gl.inputs[0])
             if gl.outputs:
                 current = gl.outputs[0]
     else:

@@ -54,6 +54,31 @@ def _update_mist(context):
         pass
 
 
+def _auto_mask(ctx, source):
+    """Auto-switch mask source when an effect slider is edited."""
+    try:
+        vfx = ctx.scene.vfx
+        if vfx.use_mask:
+            vfx.mask_source = source
+    except Exception:
+        pass
+
+
+def _fog_changed(ctx):
+    _auto_mask(ctx, 'FOG')
+    _trigger_comp(ctx)
+
+
+def _blur_changed(ctx):
+    _auto_mask(ctx, 'BLUR')
+    _trigger_comp(ctx)
+
+
+def _dof_changed(ctx):
+    _auto_mask(ctx, 'DOF')
+    _trigger_comp(ctx)
+
+
 # ---------------------------------------------------------------------
 # ENGINE ITEMS
 # ---------------------------------------------------------------------
@@ -212,7 +237,7 @@ class VFXProject(bpy.types.PropertyGroup):
     fog_strength: FloatProperty(
         name="Density (global)", default=0.0, min=0.0, max=1.0,
         description="Overall fog density, multiplies every layer",
-        update=lambda s, c: _trigger_comp(c)
+        update=lambda s, c: _fog_changed(c)
     )
     fog_color: FloatVectorProperty(
         name="Fog Color", subtype='COLOR', size=4,
@@ -227,15 +252,20 @@ class VFXProject(bpy.types.PropertyGroup):
         name="Ramp White", default=1.0, min=0.0, max=1.0,
         update=lambda s, c: _trigger_comp(c)
     )
-    mask_source: EnumProperty(
+    use_mask: BoolProperty(
         name="Show Mask",
+        description="Show effect mask in viewer instead of final composite",
+        default=False,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    mask_source: EnumProperty(
+        name="Mask Source",
         items=(
-            ('NONE', "None", "Show final composite in viewer"),
             ('FOG', "Fog Mask", "Show fog density mask"),
             ('BLUR', "Blur Mask", "Show atmospheric blur mask"),
             ('DOF', "Depth Mask", "Show depth / Z pass"),
         ),
-        default='NONE',
+        default='FOG',
         update=lambda s, c: _trigger_comp(c)
     )
     fog_expanded: BoolProperty(
@@ -285,7 +315,7 @@ class VFXProject(bpy.types.PropertyGroup):
     )
     blur_size: FloatProperty(
         name="Blur Size (px)", default=8.0, min=0.0, max=100.0,
-        update=lambda s, c: _trigger_comp(c)
+        update=lambda s, c: _blur_changed(c)
     )
     blur_ramp_black: FloatProperty(
         name="Blur Black", default=0.0, min=0.0, max=1.0,
@@ -303,15 +333,15 @@ class VFXProject(bpy.types.PropertyGroup):
     )
     dof_fstop: FloatProperty(
         name="F-Stop", default=2.8, min=0.1, max=32.0,
-        update=lambda s, c: _trigger_comp(c)
+        update=lambda s, c: _dof_changed(c)
     )
     dof_focus: FloatProperty(
         name="Focus Distance (m)", default=10.0, min=0.0, max=500.0,
-        update=lambda s, c: _trigger_comp(c)
+        update=lambda s, c: _dof_changed(c)
     )
     dof_maxblur: FloatProperty(
         name="Max Blur (px)", default=12.0, min=0.0, max=100.0,
-        update=lambda s, c: _trigger_comp(c)
+        update=lambda s, c: _dof_changed(c)
     )
     use_lensdist: BoolProperty(
         name="Lens Distortion",
