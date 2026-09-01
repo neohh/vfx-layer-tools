@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "vfx_layer_tools"
-version = "2.1.1"
+version = "2.2.0"
 name = "VFX Layer Tools"
 tagline = "VFX layer / scene / compositing manager"
 maintainer = "VFX Pipeline"

@@ -1,14 +1,14 @@
 bl_info = {
     "name": "VFX Layer Tools",
     "author": "VFX Pipeline",
-    "version": (2, 1, 1),
+    "version": (2, 2, 0),
     "blender": (5, 1, 0),
     "location": "View3D > Sidebar > VFX",
     "description": "VFX layer / scene / compositing manager",
     "category": "Compositing",
 }
 
-VFX_VERSION = "2.1.1"
+VFX_VERSION = "2.2.0"
 
 import bpy
 import importlib
@@ -350,7 +350,8 @@ from .operators import (
     VFX_OT_diagnostic,
 )
 from .ui import (
-    VFX_UL_layers, VFX_PT_main, VFX_PT_compositor,
+    VFX_UL_layers, VFX_PT_main, VFX_PT_post_effects,
+    VFX_PT_compositor, VFX_PT_compositor_effects,
 )
 
 
@@ -386,7 +387,9 @@ classes = (
     VFX_OT_refresh_proxies,
     VFX_OT_diagnostic,
     VFX_PT_main,
+    VFX_PT_post_effects,
     VFX_PT_compositor,
+    VFX_PT_compositor_effects,
 )
 
 CLASS_NAMES = tuple(cls.__name__ for cls in classes)

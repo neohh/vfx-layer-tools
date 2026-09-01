@@ -269,7 +269,7 @@ def rebuild_comp_from_files(vfx, master):
             node.label = f"{layer.layer_name} SHD"
             node["vfx_id"] = layer.id
             node["vfx_pass"] = "SHADOW"
-            node.location = (320, y)
+            node.location = (350, y)
 
         y -= 220
 
@@ -297,7 +297,7 @@ def rebuild_comp_from_files(vfx, master):
         node.label = "BACKGROUND"
         node["vfx_id"] = "BG"
         node["vfx_pass"] = "OBJECT"
-        node.location = (0, 400)
+        node.location = (0, 500)
 
     # единая live-карта глубины на всю сцену
     if getattr(vfx, "use_fog", False) or getattr(vfx, "use_blur", False) \
@@ -323,7 +323,7 @@ def rebuild_comp_from_files(vfx, master):
             node.label = "FOG MAP (live)"
             node["vfx_id"] = "FOGMAP"
             node["vfx_pass"] = "MIST"
-            node.location = (-500, 600)
+            node.location = (-350, 600)
 
     for node in list(nt.nodes):
         if node.type == 'IMAGE' and node.name.startswith("VFX_RL_"):
@@ -412,7 +412,7 @@ def rebuild_comp(vfx, master):
             valid_nodes.add(node_name)
             ensure_render_node(
                 master, layer.shadow_scene, node_name, f"{layer.layer_name} SHD",
-                layer.id, "SHADOW", x=320, y=y
+                layer.id, "SHADOW", x=350, y=y
             )
 
         y -= 220
@@ -433,7 +433,7 @@ def rebuild_comp(vfx, master):
             valid_nodes.add("VFX_RL_FOGMAP")
             ensure_render_node(
                 master, fm, "VFX_RL_FOGMAP", "FOG MAP (live)",
-                "FOGMAP", "MIST", x=-500, y=600
+                "FOGMAP", "MIST", x=-350, y=600
             )
 
     for node in list(nt.nodes):
@@ -484,7 +484,7 @@ def _ensure_fogmap(nt, vfx, master):
     if fm is not None:
         ensure_render_node(
             master, fm, "VFX_RL_FOGMAP", "FOG MAP (live)",
-            "FOGMAP", "MIST", x=-500, y=600
+            "FOGMAP", "MIST", x=-350, y=600
         )
     return nt.nodes.get("VFX_RL_FOGMAP")
 
@@ -757,7 +757,7 @@ def build_comp_assembly(vfx, master, nt=None):
                         raise RuntimeError("no group node id")
                     gnode.name = "VFX_FOG_GROUP"
                     gnode.label = "FOG"
-                    gnode.location = (700, 500)
+                    gnode.location = (500, 500)
                 gnode.node_tree = ng
 
                 def relink(sock, out):
@@ -843,7 +843,7 @@ def build_comp_assembly(vfx, master, nt=None):
             mix.name = f"VFX_MIX_{mix_index:02d}"
             mix.label = f"{layer.layer_name} {kind}"
             mix["vfx_mix"] = 1
-            mix.location = (600, -mix_index * 180)
+            mix.location = (500, -mix_index * 200)
 
             img = [s for s in mix.inputs if s.type == 'RGBA']
             fac = [s for s in mix.inputs if s.type == 'VALUE']
@@ -882,7 +882,7 @@ def build_comp_assembly(vfx, master, nt=None):
                     if mr is not None:
                         mr.name = "VFX_BLURRAMP"
                         mr.label = "BLUR RAMP"
-                        mr.location = (300, -700)
+                        mr.location = (800, 100)
                 mask_src = mist_b
                 if mr is not None:
                     try:
@@ -909,7 +909,7 @@ def build_comp_assembly(vfx, master, nt=None):
                     bm = _new_node(nt, "CompositorNodeMath", "ShaderNodeMath")
                     if bm is not None:
                         bm.name = "VFX_BLURMATH"
-                        bm.location = (500, -700)
+                        bm.location = (1000, 100)
                 if bm is not None:
                     try:
                         bm.operation = 'MULTIPLY'
@@ -926,7 +926,7 @@ def build_comp_assembly(vfx, master, nt=None):
                             bl = nt.nodes.new("CompositorNodeBlur")
                             bl.name = "VFX_BLUR"
                             bl.label = "ATMO BLUR"
-                            bl.location = (700, -700)
+                            bl.location = (1200, 100)
                         except Exception:
                             bl = None
                     if bl is not None:
@@ -967,7 +967,7 @@ def build_comp_assembly(vfx, master, nt=None):
                         df = nt.nodes.new("CompositorNodeDefocus")
                         df.name = "VFX_DOF"
                         df.label = "CAMERA DOF"
-                        df.location = (700, -900)
+                        df.location = (1200, -200)
                     except Exception:
                         df = None
                 if df is not None:
@@ -1013,22 +1013,31 @@ def build_comp_assembly(vfx, master, nt=None):
                 gl = nt.nodes.new("CompositorNodeGlare")
                 gl.name = "VFX_GLARE"
                 gl.label = "GLARE"
-                gl.location = (700, -500)
+                gl.location = (1200, -400)
             except Exception:
                 gl = None
         if gl is not None:
-            for attr, val in (("glare_type", vfx.glare_type),
-                              ("mode", vfx.glare_type)):
+            # Set glare type (try multiple attr names for compat)
+            for attr in ("glare_type", "type", "mode"):
+                try:
+                    setattr(gl, attr, vfx.glare_type)
+                    break
+                except Exception:
+                    pass
+            # threshold + size
+            for attr, val in (("threshold", vfx.glare_threshold),
+                              ("size", vfx.glare_size)):
                 try:
                     setattr(gl, attr, val)
                 except Exception:
                     pass
-            for attr, val in (("strength", vfx.glare_strength),
-                              ("threshold", vfx.glare_threshold),
-                              ("size", vfx.glare_size),
-                              ("mix", 0.0)):
+            # Map glare_strength (0..5) → mix (1.0..-1.0)
+            # 0=no effect, 2.5=full blend, 5=glare only
+            mix_val = 1.0 - (vfx.glare_strength / 2.5)
+            mix_val = max(-1.0, min(1.0, mix_val))
+            for attr in ("mix",):
                 try:
-                    setattr(gl, attr, val)
+                    setattr(gl, attr, mix_val)
                 except Exception:
                     pass
             if gl.inputs:
@@ -1047,7 +1056,7 @@ def build_comp_assembly(vfx, master, nt=None):
                 ld = nt.nodes.new("CompositorNodeLensdist")
                 ld.name = "VFX_LENSDIST"
                 ld.label = "LENS DIST"
-                ld.location = (900, -700)
+                ld.location = (1200, -600)
             except Exception:
                 ld = None
         if ld is not None:
@@ -1079,7 +1088,7 @@ def build_comp_assembly(vfx, master, nt=None):
                     "NodeComposite"):
             try:
                 comp = nt.nodes.new(bid)
-                comp.location = (900, 0)
+                comp.location = (1600, 0)
                 break
             except Exception:
                 comp = None
@@ -1103,7 +1112,7 @@ def build_comp_assembly(vfx, master, nt=None):
             except Exception:
                 pass
             gout = nt.nodes.new("NodeGroupOutput")
-            gout.location = (900, -250)
+            gout.location = (1600, -250)
         if gout is not None and len(gout.inputs) > 0:
             nt.links.new(current, gout.inputs[0])
     except Exception:
