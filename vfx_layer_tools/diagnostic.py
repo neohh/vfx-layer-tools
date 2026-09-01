@@ -168,13 +168,142 @@ def force_enable_passes():
     print("Now re-render to bake passes into EXR files.")
 
 
+def test_glare_sync():
+    """Test Glare node property sync — find what actually works."""
+    print("\n" + "=" * 60)
+    print("GLARE SYNC TEST")
+    print("=" * 60)
+
+    scene = bpy.context.scene
+    if not hasattr(scene, 'vfx'):
+        print("ERROR: VFX not registered")
+        return
+    vfx = scene.vfx
+
+    # 1. Create a temp Glare node
+    print("\n--- Creating temp CompositorNodeGlare ---")
+    test_node = None
+    try:
+        test_node = bpy.data.node_groups.new("_VFX_TEST", 'CompositorNodeTree')
+        ng = test_node
+        # Find or create a compositor tree to test in
+        master = vfx.master_scene or scene
+        nt = None
+        for attr in ("node_tree", "compositor_node_tree", "compositing_node_tree"):
+            nt = getattr(master, attr, None)
+            if nt is not None:
+                break
+        if nt is None and master.use_nodes:
+            nt = master.node_tree
+        if nt is None:
+            print("ERROR: No compositor node tree found")
+            bpy.data.node_groups.remove(test_node)
+            return
+
+        gl = nt.nodes.new("CompositorNodeGlare")
+        gl.name = "_VFX_TEST_GLARE"
+        gl.location = (0, 0)
+        print(f"Created: {gl.name}  type={gl.type}  bl_idname={gl.bl_idname}")
+
+        # 2. List ALL properties via rna_type
+        print("\n--- ALL rna_type properties ---")
+        for prop in gl.rna_type.properties:
+            if prop.identifier.startswith("_"):
+                continue
+            try:
+                val = getattr(gl, prop.identifier)
+            except Exception:
+                val = "<ERROR>"
+            print(f"  {prop.identifier:30s} = {val!r:40s}  type={prop.type}")
+
+        # 3. List ALL rna_type enum items for glare_type / type / mode
+        print("\n--- Enum properties with items ---")
+        for prop in gl.rna_type.properties:
+            if prop.type == 'ENUM' and prop.enum_items:
+                items = [item.identifier for item in prop.enum_items]
+                print(f"  {prop.identifier}: {items}")
+
+        # 4. Try to SET glare_type with various values
+        print("\n--- Trying to set glare_type ---")
+        target = vfx.glare_type
+        print(f"  vfx.glare_type = {target!r}")
+        for attr in ("glare_type", "type", "mode"):
+            for val in (target, target.lower(), target.replace("_", " ")):
+                try:
+                    old_val = getattr(gl, attr, "<N/A>")
+                    setattr(gl, attr, val)
+                    new_val = getattr(gl, attr)
+                    print(f"  setattr(gl, {attr!r}, {val!r}) -> OK  ({old_val!r} -> {new_val!r})")
+                except Exception as e:
+                    print(f"  setattr(gl, {attr!r}, {val!r}) -> FAILED: {e}")
+
+        # 5. Try to SET threshold, size, mix
+        print("\n--- Trying to set threshold/size/mix ---")
+        for attr, val in (("threshold", 7.0), ("size", 0.5), ("mix", -0.3)):
+            try:
+                old_val = getattr(gl, attr, "<N/A>")
+                setattr(gl, attr, val)
+                new_val = getattr(gl, attr)
+                print(f"  setattr(gl, {attr!r}, {val!r}) -> OK  ({old_val!r} -> {new_val!r})")
+            except Exception as e:
+                print(f"  setattr(gl, {attr!r}, {val!r}) -> FAILED: {e}")
+            # Also try input socket
+            for sock in gl.inputs:
+                if sock.name.lower() == attr.lower():
+                    try:
+                        sock.default_value = val
+                        print(f"  input[{sock.name!r}].default_value = {val!r} -> OK")
+                    except Exception as e:
+                        print(f"  input[{sock.name!r}].default_value = {val!r} -> FAILED: {e}")
+
+        # 6. Test existing VFX_GLARE node if present
+        print("\n--- Existing VFX_GLARE node ---")
+        existing = nt.nodes.get("VFX_GLARE")
+        if existing is not None:
+            print(f"  Found: {existing.name} type={existing.type}")
+            for prop in existing.rna_type.properties:
+                if prop.type == 'ENUM' and prop.enum_items:
+                    items = [item.identifier for item in prop.enum_items]
+                    print(f"  {prop.identifier}: {items}")
+            # Try setting on existing
+            for attr, val in (("glare_type", target), ("threshold", 5.0)):
+                try:
+                    old_val = getattr(existing, attr, "<N/A>")
+                    setattr(existing, attr, val)
+                    new_val = getattr(existing, attr)
+                    print(f"  EXISTING setattr({attr!r}, {val!r}) -> OK  ({old_val!r} -> {new_val!r})")
+                except Exception as e:
+                    print(f"  EXISTING setattr({attr!r}, {val!r}) -> FAILED: {e}")
+        else:
+            print("  No VFX_GLARE node found")
+
+        # Cleanup test node
+        nt.nodes.remove(gl)
+
+    except Exception as e:
+        import traceback
+        print(f"TEST ERROR: {e}")
+        traceback.print_exc()
+    finally:
+        # Remove test node group
+        try:
+            bpy.data.node_groups.remove(test_node)
+        except Exception:
+            pass
+
+    print("\n" + "=" * 60)
+    print("GLARE SYNC TEST DONE")
+    print("=" * 60)
+
+
 def run_diagnostic():
-    """Run diagnose and return result as string (for clipboard)."""
+    """Run diagnose + glare test and return result as string (for clipboard)."""
     import io, sys
     old = sys.stdout
     sys.stdout = buf = io.StringIO()
     try:
         diagnose()
+        test_glare_sync()
     finally:
         sys.stdout = old
     return buf.getvalue()
