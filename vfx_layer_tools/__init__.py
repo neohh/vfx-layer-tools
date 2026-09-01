@@ -479,12 +479,11 @@ def register():
     unregister()
 
     for cls in classes:
-        try:
+        if not hasattr(bpy.types, cls.__name__):
             bpy.utils.register_class(cls)
-        except RuntimeError:
-            pass  # already registered during auto-reload
 
-    bpy.types.Scene.vfx = PointerProperty(type=VFXProject)
+    if not hasattr(bpy.types.Scene, "vfx"):
+        bpy.types.Scene.vfx = PointerProperty(type=VFXProject)
 
     # kick off auto-reload timer
     if _AUTO_RELOAD_ENABLED:
