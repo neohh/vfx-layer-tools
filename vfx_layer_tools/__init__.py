@@ -518,14 +518,20 @@ def unregister():
 
 
 def register():
+    print(f"VFX register() called, {len(classes)} classes to register")
     unregister()
 
     for cls in classes:
         if not hasattr(bpy.types, cls.__name__):
-            bpy.utils.register_class(cls)
+            try:
+                bpy.utils.register_class(cls)
+            except Exception as exc:
+                print(f"VFX register ERROR {cls.__name__}: {exc}")
 
     if not hasattr(bpy.types.Scene, "vfx"):
         bpy.types.Scene.vfx = PointerProperty(type=VFXProject)
+    else:
+        print("VFX: Scene.vfx already exists, skipping creation")
 
     # kick off auto-reload timer
     if _AUTO_RELOAD_ENABLED:
