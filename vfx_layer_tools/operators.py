@@ -817,6 +817,13 @@ class VFX_OT_render_all_layers(bpy.types.Operator):
                 sc.render.filepath = f"{vfx.output_dir}{sc.name}/"
             except Exception:
                 pass
+            # Ensure render passes are enabled for multi-channel EXR
+            for vl in sc.view_layers:
+                for attr in ('use_pass_mist', 'use_pass_z', 'use_pass_normal'):
+                    try:
+                        setattr(vl, attr, True)
+                    except Exception:
+                        pass
             n = (sc.frame_end - sc.frame_start + 1)
             total_frames += n
             self.steps.append((sc.name, n))
@@ -1102,6 +1109,24 @@ class VFX_OT_refresh_proxies(bpy.types.Operator):
         vfx, master = get_project(context, allow_write=True)
         refresh_shadow_proxies(vfx, master)
         self.report({'INFO'}, "Shadow proxies refreshed")
+        return {'FINISHED'}
+
+
+class VFX_OT_diagnostic(bpy.types.Operator):
+    bl_idname = "vfx.diagnostic"
+    bl_label = "VFX Diagnostic"
+    bl_description = "Run diagnostic tests and copy results to clipboard"
+
+    def execute(self, context):
+        import traceback
+        try:
+            from .diagnostic import run_diagnostic
+            text = run_diagnostic()
+        except Exception as e:
+            text = f"Diagnostic import error: {e}\n{traceback.format_exc()}"
+        context.window_manager.clipboard = text
+        print(text)
+        self.report({'INFO'}, "Diagnostic copied to clipboard")
         return {'FINISHED'}
 
 

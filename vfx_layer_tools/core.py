@@ -271,6 +271,21 @@ def sync_scene_settings(master, scene):
     except Exception:
         pass
 
+    # Enable render passes for multi-channel EXR compositing
+    for vl in scene.view_layers:
+        try:
+            vl.use_pass_mist = True
+        except Exception:
+            pass
+        try:
+            vl.use_pass_z = True
+        except Exception:
+            pass
+        try:
+            vl.use_pass_normal = True
+        except Exception:
+            pass
+
     sync_engine_settings(master, scene)
 
 

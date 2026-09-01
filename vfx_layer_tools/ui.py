@@ -231,7 +231,9 @@ class VFX_PT_main(bpy.types.Panel):
         row.prop(vfx, "objects_engine", text="Obj")
         row.prop(vfx, "shadows_engine", text="Shd")
 
-        layout.operator("vfx.rebuild_comp", text="Rebuild Comp", icon='FILE_REFRESH')
+        row = layout.row(align=True)
+        row.operator("vfx.rebuild_comp", text="Rebuild Comp", icon='FILE_REFRESH')
+        row.operator("vfx.diagnostic", text="Diagnostic", icon='CONSOLE')
 
         # GLOW / GLARE
         glowbox = layout.box()

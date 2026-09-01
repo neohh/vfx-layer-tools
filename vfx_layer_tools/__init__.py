@@ -1,16 +1,19 @@
 bl_info = {
     "name": "VFX Layer Tools",
     "author": "VFX Pipeline",
-    "version": (2, 0, 0),
+    "version": (2, 1, 0),
     "blender": (5, 1, 0),
     "location": "View3D > Sidebar > VFX",
     "description": "VFX layer / scene / compositing manager",
     "category": "Compositing",
 }
 
-VFX_VERSION = "2.0.0"
+VFX_VERSION = "2.1.0"
 
 import bpy
+import importlib
+import os
+import sys
 from bpy.props import (
     StringProperty,
     BoolProperty,
@@ -344,6 +347,7 @@ from .operators import (
     VFX_OT_render_all_layers, VFX_OT_one_click_exr,
     VFX_OT_create_background, VFX_OT_delete_background,
     VFX_OT_delete_shadow_pass, VFX_OT_refresh_proxies,
+    VFX_OT_diagnostic,
 )
 from .ui import (
     VFX_UL_layers, VFX_PT_main, VFX_PT_compositor,
@@ -380,6 +384,7 @@ classes = (
     VFX_OT_delete_background,
     VFX_OT_delete_shadow_pass,
     VFX_OT_refresh_proxies,
+    VFX_OT_diagnostic,
     VFX_PT_main,
     VFX_PT_compositor,
 )
@@ -387,7 +392,74 @@ classes = (
 CLASS_NAMES = tuple(cls.__name__ for cls in classes)
 
 
+# ---------------------------------------------------------------------
+# AUTO-RELOAD (dev convenience)
+# ---------------------------------------------------------------------
+
+_AUTO_RELOAD_ENABLED = True
+_AUTO_RELOAD_INTERVAL = 2  # seconds
+_FILE_TIMESTAMPS = {}
+
+
+_AUTO_RELOAD_FIRST_RUN = True
+
+
+def _auto_reload_timer():
+    """Check source files for changes; reload changed modules."""
+    global _AUTO_RELOAD_FIRST_RUN
+
+    if not _AUTO_RELOAD_ENABLED:
+        return None
+
+    addon_dir = os.path.dirname(__file__)
+    changed_files = []
+
+    if _AUTO_RELOAD_FIRST_RUN:
+        _AUTO_RELOAD_FIRST_RUN = False
+        print(f"VFX auto-reload: timer started, watching {addon_dir}")
+
+    for filename in os.listdir(addon_dir):
+        if not filename.endswith(".py"):
+            continue
+        filepath = os.path.join(addon_dir, filename)
+        try:
+            mtime = os.path.getmtime(filepath)
+        except OSError:
+            continue
+        if filename in _FILE_TIMESTAMPS and _FILE_TIMESTAMPS[filename] != mtime:
+            changed_files.append(filename)
+        _FILE_TIMESTAMPS[filename] = mtime
+
+    if changed_files:
+        print(f"VFX auto-reload: changed {', '.join(changed_files)}")
+        try:
+            unregister()
+
+            # Reload every vfx_layer_tools.* module
+            to_reload = [n for n in list(sys.modules) if n.startswith("vfx_layer_tools")]
+            for mod_name in to_reload:
+                mod = sys.modules.get(mod_name)
+                if mod is not None:
+                    try:
+                        importlib.reload(mod)
+                    except Exception as exc:
+                        print(f"  reload error {mod_name}: {exc}")
+
+            register()
+            print("VFX auto-reload: done")
+        except Exception as exc:
+            print(f"VFX auto-reload failed: {exc}")
+
+    return _AUTO_RELOAD_INTERVAL
+
+
 def unregister():
+    # stop auto-reload timer
+    try:
+        bpy.app.timers.unregister(_auto_reload_timer)
+    except Exception:
+        pass
+
     if hasattr(bpy.types.Scene, "vfx"):
         try:
             del bpy.types.Scene.vfx
@@ -410,6 +482,19 @@ def register():
         bpy.utils.register_class(cls)
 
     bpy.types.Scene.vfx = PointerProperty(type=VFXProject)
+
+    # kick off auto-reload timer
+    if _AUTO_RELOAD_ENABLED:
+        try:
+            addon_dir = os.path.dirname(__file__)
+            for filename in os.listdir(addon_dir):
+                if filename.endswith(".py"):
+                    filepath = os.path.join(addon_dir, filename)
+                    _FILE_TIMESTAMPS[filename] = os.path.getmtime(filepath)
+            bpy.app.timers.register(_auto_reload_timer, first_interval=_AUTO_RELOAD_INTERVAL)
+            print(f"VFX auto-reload: watching for changes every {_AUTO_RELOAD_INTERVAL}s")
+        except Exception as exc:
+            print(f"VFX auto-reload init error: {exc}")
 
 
 if __name__ == "__main__":

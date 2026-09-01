@@ -1,6 +1,6 @@
 # VFX Layer Tools
 
-**Версия:** 1.77  
+**Версия:** 2.1.0  
 **Blender:** 5.1+  
 **Категория:** Compositing
 
@@ -59,13 +59,15 @@
 
 ```
 vfx_layer_tools/            ← пакет аддона (устанавливается как zip)
-├── __init__.py             ← bl_info, Properties, register/unregister (376 строк)
+├── __init__.py             ← bl_info, Properties, register/unregister
+├── blender_manifest.toml   ← Extension Platform manifest (Blender 5.2+)
 ├── core.py                 ← утилиты, коллекции, сцены, синхронизация (337 строк)
-├── shadow.py               ← shadow catcher, прокси-объекты (188 строк)
-├── compositor.py           ← дерево композитора, сборка нод, fog (1119 строк)
-├── materials.py            ← редактирование материалов (318 строк)
-├── operators.py            ← все операторы (1092 строк)
-└── ui.py                   ← панели и UIList (307 строк)
+├── shadow.py               ← shadow catcher, прокси-объекты
+├── compositor.py           ← дерево композитора, сборка нод, fog
+├── materials.py            ← редактирование материалов
+├── diagnostic.py           ← диагностика
+├── operators.py            ← все операторы
+└── ui.py                   ← панели и UIList
 archive/                    ← исходные 5 версий (архив)
 ```
 

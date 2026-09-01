@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.1.0 — 2026-09-01
+
+### Совместимость
+- Добавлен `blender_manifest.toml` для Extension Platform Blender 5.2+
+- Исправлена ошибка установки `module loaded with no associated file` на Blender 5.2
+- Аддон теперь корректно распознаётся как расширение через `bl_extension_ops.py`
+
 ## 2.0.0 — 2026-08-31
 
 ### Архитектура
