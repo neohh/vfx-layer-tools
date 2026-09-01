@@ -114,10 +114,12 @@ gh release upload vX.Y.Z vfx_layer_tools_vX.Y.Z.zip --clobber
 vfx-layer-tools/
 ├── vfx_layer_tools/          ← пакет аддона (устанавливается в Blender)
 │   ├── __init__.py           ← bl_info, Properties, register/unregister
+│   ├── blender_manifest.toml ← Extension Platform manifest (Blender 5.2+)
 │   ├── core.py               ← утилиты, коллекции, сцены
 │   ├── shadow.py             ← shadow catcher, прокси
 │   ├── compositor.py         ← композитор, fog, blur, DOF, glare
 │   ├── materials.py          ← редактирование материалов
+│   ├── diagnostic.py         ← диагностика
 │   ├── operators.py          ← все операторы
 │   └── ui.py                 ← панели, UIList
 ├── archive/                  ← исходные 5 версий (архив)
@@ -127,10 +129,19 @@ vfx-layer-tools/
 └── .gitignore
 ```
 
+## Обязательно после каждого коммита
+
+1. **Всегда пушить** — `git push origin master` (или `git push origin master --tags` если есть тег)
+2. **Всегда создавать/обновлять zip** — файл `vfx_layer_tools_vX.Y.Z.zip` в **текущей директории** проекта
+   - Если версия не изменилась — заменять существующий zip
+   - Имя файла соответствует версии из `__init__.py`
+3. Если есть релиз для этой версии — **прикрепить zip** через `gh release upload ... --clobber`
+
 ## Запрещено
 
-- `git push` без разрешения
+- `git push` без разрешения (но после разрешения — **обязательно пушить**)
 - `git reset --hard`, `git rebase`, `git push -f`
 - Удалять файлы из `archive/`
 - Менять структуру пакета `vfx_layer_tools/` без согласования
 - Делать релиз без прикреплённого zip-архива
+- Коммитить без последующего пуша (GitHub должен видеть актуальное состояние)
