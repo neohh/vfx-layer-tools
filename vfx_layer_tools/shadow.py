@@ -7,10 +7,6 @@ from mathutils import Vector
 from .core import ensure_root, ensure_camera_collection, ensure_light_collection
 
 
-# ---------------------------------------------------------------------
-# SHADOW
-# ---------------------------------------------------------------------
-
 def set_shadow_catcher(obj, state=True):
     if hasattr(obj, "is_shadow_catcher"):
         try:
@@ -63,7 +59,6 @@ def refresh_shadow_proxies(vfx, master):
         catch_col = layer.shadow_catch_collection
         if not cast_col or not catch_col:
             continue
-
         for col in (cast_col, catch_col):
             for obj in list(col.objects):
                 if obj.get("vfx_proxy") == layer.id:
@@ -71,7 +66,6 @@ def refresh_shadow_proxies(vfx, master):
                         bpy.data.objects.remove(obj, do_unlink=True)
                     except Exception:
                         pass
-
         drawable = {'MESH', 'CURVE', 'VOLUME', 'SURFACE', 'META'}
 
         def make_proxy(obj, suffix, col):
@@ -80,7 +74,6 @@ def refresh_shadow_proxies(vfx, master):
             if getattr(obj, "data", None):
                 proxy.data = obj.data
             proxy["vfx_proxy"] = layer.id
-
             chain = []
             node = obj.parent
             ok_chain = True
@@ -91,7 +84,6 @@ def refresh_shadow_proxies(vfx, master):
                 else:
                     ok_chain = False
                     break
-
             if ok_chain:
                 for n in chain:
                     if n.name not in col.objects:
@@ -108,7 +100,6 @@ def refresh_shadow_proxies(vfx, master):
                 proxy.matrix_parent_inverse.identity()
                 if mw is not None:
                     proxy.matrix_basis = mw
-
             if col.objects.get(proxy.name) is None:
                 col.objects.link(proxy)
             return proxy
@@ -119,7 +110,6 @@ def refresh_shadow_proxies(vfx, master):
                     continue
                 p = make_proxy(obj, "_VFXCatch", catch_col)
                 set_shadow_catcher(p, True)
-
             for other in vfx.layers:
                 if other.id == layer.id or not other.enabled or not other.collection:
                     continue
@@ -137,7 +127,6 @@ def refresh_shadow_proxies(vfx, master):
                     continue
                 p = make_proxy(obj, "_VFXShadowCaster", cast_col)
                 set_only_shadow_caster(p)
-
             if catcher and catch_col.objects.get(catcher.name) is None:
                 catch_col.objects.link(catcher)
 
@@ -160,16 +149,13 @@ def create_default_catcher(layer, master):
     existing = bpy.data.objects.get(name)
     if existing:
         return existing
-
     mesh = bpy.data.meshes.new(name)
     bm = bmesh.new()
     bmesh.ops.create_grid(bm, x_segments=1, y_segments=1, size=50.0)
     bm.to_mesh(mesh)
     bm.free()
-
     catcher = bpy.data.objects.new(name, mesh)
     master.collection.objects.link(catcher)
-
     min_z = None
     if layer.collection:
         for obj in layer.collection.objects:
@@ -178,10 +164,7 @@ def create_default_catcher(layer, master):
                     world_corner = obj.matrix_world @ Vector(corner)
                     z = world_corner.z
                     min_z = z if min_z is None else min(min_z, z)
-
     if min_z is not None:
         catcher.location.z = min_z - 0.05
-
     set_shadow_catcher(catcher, True)
     return catcher
-
