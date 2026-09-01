@@ -227,10 +227,15 @@ class VFXProject(bpy.types.PropertyGroup):
         name="Ramp White", default=1.0, min=0.0, max=1.0,
         update=lambda s, c: _trigger_comp(c)
     )
-    fog_preview: BoolProperty(
-        name="Show Mask (viewer)",
-        description="Temporarily show the fog mask in the viewer instead of the scene",
-        default=False,
+    mask_source: EnumProperty(
+        name="Show Mask",
+        items=(
+            ('NONE', "None", "Show final composite in viewer"),
+            ('FOG', "Fog Mask", "Show fog density mask"),
+            ('BLUR', "Blur Mask", "Show atmospheric blur mask"),
+            ('DOF', "Depth Mask", "Show depth / Z pass"),
+        ),
+        default='NONE',
         update=lambda s, c: _trigger_comp(c)
     )
     fog_expanded: BoolProperty(

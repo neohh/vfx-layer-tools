@@ -162,11 +162,12 @@ def _draw_post_effects(context, layout):
     """Shared: draw all post-processing effects (fog, blur, DOF, glare, lensdist)."""
     vfx, master = get_project(context, allow_write=False)
 
-    # ── Show Mask (always visible at the top) ──
-    mask_row = layout.row(align=True)
-    mask_row.prop(vfx, "fog_preview", text="Show Mask", icon='HIDE_OFF')
+    ms = getattr(vfx, 'mask_source', 'NONE')
 
-    layout.separator()
+    # ── Mask selector (top bar) ──
+    mask_row = layout.row(align=True)
+    mask_row.label(text="Mask:", icon='HIDE_OFF')
+    mask_row.prop(vfx, "mask_source", text="")
 
     # ── FOG ──
     fogbox = layout.box()

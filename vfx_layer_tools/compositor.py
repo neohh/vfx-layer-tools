@@ -844,7 +844,7 @@ def build_comp_assembly(vfx, master, nt=None):
                 if oi is not None:
                     current = oi
                     fog_done = True
-                if getattr(vfx, "fog_preview", False):
+                if getattr(vfx, "mask_source", 'NONE') == 'FOG':
                     om = gnode.outputs.get("Mask")
                     if om is not None:
                         view_sock = om
@@ -982,6 +982,10 @@ def build_comp_assembly(vfx, master, nt=None):
                         nt.links.new(bm.outputs[0], size_in)
                     if bl.outputs:
                         current = bl.outputs[0]
+                    # Mask routing: show blur mask if selected
+                    if getattr(vfx, 'mask_source', 'NONE') == 'BLUR' \
+                            and mr is not None:
+                        view_sock = mr.outputs.get("Result")
         except Exception as e:
             print("VFX blur error:", e)
     else:
@@ -1026,6 +1030,10 @@ def build_comp_assembly(vfx, master, nt=None):
                         nt.links.new(fmn.outputs["Depth"], z_in)
                     if df.outputs:
                         current = df.outputs[0]
+                    # Mask routing: show depth mask if selected
+                    if getattr(vfx, 'mask_source', 'NONE') == 'DOF' \
+                            and fmn is not None:
+                        view_sock = fmn.outputs.get("Depth")
         except Exception as e:
             print("VFX dof error:", e)
     else:
