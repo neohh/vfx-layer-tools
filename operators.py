@@ -985,3 +985,71 @@ class VFX_OT_disable_cryptomatte(bpy.types.Operator):
         rebuild_comp(vfx, master)
         self.report({'INFO'}, "Cryptomatte disabled")
         return {'FINISHED'}
+
+
+class VFX_OT_reset_layer_grade(bpy.types.Operator):
+    bl_idname = "vfx.reset_layer_grade"
+    bl_label = "Reset Layer Grade"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=True)
+        layer = active_layer(vfx)
+        if not layer:
+            self.report({'ERROR'}, "No active layer")
+            return {'CANCELLED'}
+        layer.g_exposure = 0.0
+        layer.g_temp = 0.0
+        layer.g_tint = 0.0
+        layer.g_lift = (0.0, 0.0, 0.0)
+        layer.g_gamma = (0.5, 0.5, 0.5)
+        layer.g_gain = (1.0, 1.0, 1.0)
+        layer.g_saturation = 1.0
+        layer.g_contrast = 1.0
+        rebuild_comp(vfx, master)
+        self.report({'INFO'}, "Layer grade reset")
+        return {'FINISHED'}
+
+
+class VFX_OT_reset_master_grade(bpy.types.Operator):
+    bl_idname = "vfx.reset_master_grade"
+    bl_label = "Reset Master Grade"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=True)
+        vfx.m_exposure = 0.0
+        vfx.m_temp = 0.0
+        vfx.m_tint = 0.0
+        vfx.m_lift = (0.0, 0.0, 0.0)
+        vfx.m_gamma = (0.5, 0.5, 0.5)
+        vfx.m_gain = (1.0, 1.0, 1.0)
+        vfx.m_saturation = 1.0
+        vfx.m_contrast = 1.0
+        rebuild_comp(vfx, master)
+        self.report({'INFO'}, "Master grade reset")
+        return {'FINISHED'}
+
+
+class VFX_OT_copy_master_grade(bpy.types.Operator):
+    bl_idname = "vfx.copy_master_grade"
+    bl_label = "Copy Master Grade to All Layers"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=True)
+        for layer in vfx.layers:
+            if not layer.enabled:
+                continue
+            layer.grade_enable = True
+            layer.g_exposure = vfx.m_exposure
+            layer.g_temp = vfx.m_temp
+            layer.g_tint = vfx.m_tint
+            layer.g_lift = vfx.m_lift[:]
+            layer.g_gamma = vfx.m_gamma[:]
+            layer.g_gain = vfx.m_gain[:]
+            layer.g_saturation = vfx.m_saturation
+            layer.g_contrast = vfx.m_contrast
+        rebuild_comp(vfx, master)
+        self.report({'INFO'}, f"Copied master grade to {len(vfx.layers)} layers")
+        return {'FINISHED'}

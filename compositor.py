@@ -8,6 +8,7 @@ from .core import (
     create_empty_scene, sync_scene_settings,
 )
 from .materials import _trigger_comp
+from .grade import ensure_layer_grades, ensure_master_grade
 
 
 # ---------------------------------------------------------------------
@@ -760,6 +761,11 @@ def build_comp_assembly(vfx, master, nt=None):
     view_sock = None
     fog_done = False
 
+    # ── PER-LAYER GRADES ──
+    grade_nodes = ensure_layer_grades(vfx, master, nt)
+    if grade_nodes:
+        print(f"VFX grades: {len(grade_nodes)} per-layer grade nodes created")
+
     # туман: вся сборка (фог слоев ДО альфа-оверов) внутри группы
     if getattr(vfx, "use_fog", False):
         try:
@@ -818,12 +824,16 @@ def build_comp_assembly(vfx, master, nt=None):
                 for entry in meta:
                     lid = entry["id"]
                     lay = entry["layer"]
-                    ln = nt.nodes.get(f"VFX_RL_{lid}")
-                    if ln is None:
-                        continue
+                    # Use grade output if available, otherwise raw source
+                    grade_n = grade_nodes.get(lid)
+                    if grade_n is not None:
+                        src_sock = grade_n.outputs.get("Image")
+                    else:
+                        ln = nt.nodes.get(f"VFX_RL_{lid}")
+                        src_sock = ln.outputs.get("Image") if ln else None
                     s = gi(f"OBJ_{lid}")
-                    if s is not None and ln.outputs.get("Image"):
-                        relink(s, ln.outputs["Image"])
+                    if s is not None and src_sock is not None:
+                        relink(s, src_sock)
                     s = gi(f"AL_{lid}")
                     if s is not None and ln.outputs.get("Alpha"):
                         relink(s, ln.outputs["Alpha"])
@@ -855,12 +865,20 @@ def build_comp_assembly(vfx, master, nt=None):
 
     # без тумана (или если группа не собралась): старая цепочка миксов
     if not fog_done:
+        # Replace raw source sockets with grade outputs where available
+        graded_sockets = []
+        for layer, kind, sock in sockets:
+            grade_n = grade_nodes.get(layer.id) if kind == 'OBJ' else None
+            if grade_n is not None and grade_n.outputs.get("Image"):
+                graded_sockets.append((layer, kind, grade_n.outputs["Image"]))
+            else:
+                graded_sockets.append((layer, kind, sock))
         if bg_sock is not None:
             current = bg_sock
-            mix_list = sockets
+            mix_list = graded_sockets
         else:
-            current = sockets[0][2]
-            mix_list = sockets[1:]
+            current = graded_sockets[0][2]
+            mix_list = graded_sockets[1:]
 
         mix_index = 0
         for layer, kind, sock in mix_list:
@@ -1162,6 +1180,19 @@ def build_comp_assembly(vfx, master, nt=None):
                 current = ld.outputs[0]
     else:
         _remove_nodes(nt, "VFX_LENSDIST")
+
+    # ── MASTER GRADE ──
+    mg = ensure_master_grade(vfx, master, nt)
+    if mg is not None:
+        mg_in = mg.inputs.get("Image")
+        if mg_in is not None and current is not None:
+            for l in list(mg_in.links):
+                nt.links.remove(l)
+            nt.links.new(current, mg_in)
+            print("VFX master grade: CONNECTED")
+        mg_out = mg.outputs.get("Image")
+        if mg_out is not None:
+            current = mg_out
 
     comp = None
     for node in nt.nodes:

@@ -1,14 +1,14 @@
 bl_info = {
     "name": "VFX Layer Tools",
     "author": "VFX Pipeline",
-    "version": (2, 4, 2),
+    "version": (2, 5, 0),
     "blender": (5, 1, 0),
     "location": "View3D > Sidebar > VFX",
     "description": "VFX layer / scene / compositing manager",
     "category": "Compositing",
 }
 
-VFX_VERSION = "2.4.2"
+VFX_VERSION = "2.5.0"
 
 import bpy
 import importlib
@@ -170,6 +170,49 @@ class VFXLayer(bpy.types.PropertyGroup):
         name="Expanded",
         description="Show shadow pass sub-row",
         default=False
+    )
+
+    # -- Per-layer grade --
+    grade_enable: BoolProperty(
+        name="Grade",
+        description="Enable per-layer color grading (before FOG)",
+        default=False,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    g_exposure: FloatProperty(
+        name="Exposure", default=0.0, min=-6.0, max=6.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    g_temp: FloatProperty(
+        name="Temperature", default=0.0, min=-1.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    g_tint: FloatProperty(
+        name="Tint", default=0.0, min=-1.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    g_lift: FloatVectorProperty(
+        name="Lift", subtype='COLOR', size=3,
+        default=(0.0, 0.0, 0.0), min=0.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    g_gamma: FloatVectorProperty(
+        name="Gamma", subtype='COLOR', size=3,
+        default=(0.5, 0.5, 0.5), min=0.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    g_gain: FloatVectorProperty(
+        name="Gain", subtype='COLOR', size=3,
+        default=(1.0, 1.0, 1.0), min=0.0, max=2.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    g_saturation: FloatProperty(
+        name="Saturation", default=1.0, min=0.0, max=2.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    g_contrast: FloatProperty(
+        name="Contrast", default=1.0, min=0.0, max=2.0,
+        update=lambda s, c: _trigger_comp(c)
     )
 
 
@@ -391,6 +434,49 @@ class VFXProject(bpy.types.PropertyGroup):
         update=lambda s, c: _trigger_comp(c)
     )
 
+    # -- Master grade --
+    m_grade_enable: BoolProperty(
+        name="Master Grade",
+        description="Enable master color grading (after all post-effects)",
+        default=False,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    m_exposure: FloatProperty(
+        name="M: Exposure", default=0.0, min=-6.0, max=6.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    m_temp: FloatProperty(
+        name="M: Temperature", default=0.0, min=-1.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    m_tint: FloatProperty(
+        name="M: Tint", default=0.0, min=-1.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    m_lift: FloatVectorProperty(
+        name="M: Lift", subtype='COLOR', size=3,
+        default=(0.0, 0.0, 0.0), min=0.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    m_gamma: FloatVectorProperty(
+        name="M: Gamma", subtype='COLOR', size=3,
+        default=(0.5, 0.5, 0.5), min=0.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    m_gain: FloatVectorProperty(
+        name="M: Gain", subtype='COLOR', size=3,
+        default=(1.0, 1.0, 1.0), min=0.0, max=2.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    m_saturation: FloatProperty(
+        name="M: Saturation", default=1.0, min=0.0, max=2.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    m_contrast: FloatProperty(
+        name="M: Contrast", default=1.0, min=0.0, max=2.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+
 
 # ---------------------------------------------------------------------
 # SUBMODULE IMPORTS (after class definitions to avoid circular import)
@@ -417,6 +503,8 @@ from .operators import (
     VFX_OT_delete_shadow_pass, VFX_OT_refresh_proxies,
     VFX_OT_diagnostic, VFX_OT_apply_color_preset,
     VFX_OT_enable_cryptomatte, VFX_OT_disable_cryptomatte,
+    VFX_OT_reset_layer_grade, VFX_OT_reset_master_grade,
+    VFX_OT_copy_master_grade,
 )
 from .ui import (
     VFX_UL_layers, VFX_PT_main, VFX_PT_post_effects,
@@ -458,6 +546,9 @@ classes = (
     VFX_OT_apply_color_preset,
     VFX_OT_enable_cryptomatte,
     VFX_OT_disable_cryptomatte,
+    VFX_OT_reset_layer_grade,
+    VFX_OT_reset_master_grade,
+    VFX_OT_copy_master_grade,
     VFX_PT_main,
     VFX_PT_post_effects,
     VFX_PT_compositor,

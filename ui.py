@@ -157,6 +157,25 @@ def _draw_layer_list(context, layout):
                 adj.prop(layer, "tint_color", text="")
             adj.operator("vfx.reset_lighting", icon='LOOP_BACK')
 
+        # ── Per-layer GRADE ──
+        box.separator()
+        gbox = box.box()
+        gr = gbox.row(align=True)
+        gr.prop(layer, "grade_enable", text="")
+        gr.label(text="GRADE", icon='COLOR')
+        if layer.grade_enable:
+            gc = gbox.column(align=True)
+            gc.prop(layer, "g_exposure")
+            gc.prop(layer, "g_temp")
+            gc.prop(layer, "g_tint")
+            gc.prop(layer, "g_saturation")
+            gc.prop(layer, "g_contrast")
+            row_lgg = gc.row(align=True)
+            row_lgg.prop(layer, "g_lift", text="Lift")
+            row_lgg.prop(layer, "g_gamma", text="Gamma")
+            row_lgg.prop(layer, "g_gain", text="Gain")
+            gbox.operator("vfx.reset_layer_grade", icon='LOOP_BACK')
+
 
 def _draw_post_effects(context, layout):
     """Shared: draw all post-processing effects (fog, blur, DOF, glare, lensdist)."""
@@ -253,6 +272,26 @@ def _draw_post_effects(context, layout):
         cryptor.operator("vfx.enable_cryptomatte", text="", icon='FILE_REFRESH')
     else:
         cryptor.operator("vfx.enable_cryptomatte", text="Enable", icon='ADD')
+
+    # ── MASTER GRADE ──
+    mgbox = layout.box()
+    mgr = mgbox.row(align=True)
+    mgr.prop(vfx, "m_grade_enable", text="")
+    mgr.label(text="MASTER GRADE", icon='COLOR')
+    if vfx.m_grade_enable:
+        mgc = mgbox.column(align=True)
+        mgc.prop(vfx, "m_exposure")
+        mgc.prop(vfx, "m_temp")
+        mgc.prop(vfx, "m_tint")
+        mgc.prop(vfx, "m_saturation")
+        mgc.prop(vfx, "m_contrast")
+        row_lgg = mgc.row(align=True)
+        row_lgg.prop(vfx, "m_lift", text="Lift")
+        row_lgg.prop(vfx, "m_gamma", text="Gamma")
+        row_lgg.prop(vfx, "m_gain", text="Gain")
+        row_btn = mgbox.row(align=True)
+        row_btn.operator("vfx.reset_master_grade", icon='LOOP_BACK')
+        row_btn.operator("vfx.copy_master_grade", icon='COPYDOWN')
 
 
 def _draw_render_settings(context, layout):
