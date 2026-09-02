@@ -12,17 +12,21 @@ def _log(msg):
     print(f"VFX GRADE: {msg}")
 
 
-def _find_sock(node, name, kind='input'):
+def _find_sock(node, name, kind='input', prefer_color=False):
+    """Find socket by name. If prefer_color=True, prefer COLOR/RGBA sockets
+    over VALUE sockets (needed for ColorBalance which has float+color inputs
+    with the same name like Lift/Gamma/Gain)."""
     if not node:
         return None
     coll = node.inputs if kind == 'input' else node.outputs
+    first_match = None
     for s in coll:
-        if s.name == name:
-            return s
-    for s in coll:
-        if s.name.lower() == name.lower():
-            return s
-    return None
+        if s.name == name or s.name.lower() == name.lower():
+            if prefer_color and s.type in ('COLOR', 'RGBA'):
+                return s
+            if first_match is None:
+                first_match = s
+    return first_match
 
 
 def _link(ng, a, b):
@@ -243,10 +247,10 @@ def build_vfx_grade_group():
         if g:
             _link(ng, cw.outputs[0], g)
 
-    # LGG: gin.Lift/Gamma/Gain → CB3.Lift/Gamma/Gain
+    # LGG: gin.Lift/Gamma/Gain → CB3.Lift/Gamma/Gain (COLOR inputs, not float)
     for name in ("Lift", "Gamma", "Gain"):
         src = _find_sock(gin, name, 'output')
-        dst = _find_sock(cb3, name, 'input')
+        dst = _find_sock(cb3, name, 'input', prefer_color=True)
         if src and dst:
             _link(ng, src, dst)
 
