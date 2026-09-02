@@ -1,52 +1,18 @@
 """VFX Layer Tools — Two-level color grading system.
 
-Per-layer grade: before FOG group, for matching layers.
-Master grade: after all post-effects, for final look.
-
-VFX_Grade node group chain (Blender 5.x compatible):
-  GroupInput → CB1(Exp+WB) → CB2(LGG) → HueSat → BrightContrast → GroupOutput
-
-No CompositorNodeMix/CompositorNodeMixRGB (don't exist in Blender 5.x compositor).
+Architecture fix: each grade node instance stores values in its own
+INPUT SOCKETS. The internal chain reads from GroupInput. Per-layer
+and master are fully independent — changing one never affects the other.
 """
 
 import bpy
-import traceback
 
 
 def _log(msg):
     print(f"VFX GRADE: {msg}")
 
 
-# ---------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------
-
-def _safe_set_color(node, attr, rgb):
-    """Set a color property, trying different tuple sizes."""
-    for vals in (tuple(rgb) + (1.0,), tuple(rgb)):
-        try:
-            setattr(node, attr, vals)
-            return
-        except Exception:
-            continue
-
-
-def _compute_wb_gain(exposure, temp, tint):
-    """Compute gain color for exposure + white balance.
-
-    exposure: EV stops (2^EV is the multiplier)
-    temp: -1..1, positive=warm(red+), negative=cool(blue+)
-    tint: -1..1, positive=green+, negative=magenta+
-    """
-    ev = 2.0 ** exposure
-    temp_r = 1.0 + temp * 0.5
-    temp_b = 1.0 - temp * 0.5
-    tint_g = 1.0 + tint * 0.5
-    return (ev * temp_r, ev * tint_g, ev * temp_b)
-
-
 def _find_sock(node, name, kind='input'):
-    """Find socket by name (case-insensitive)."""
     if not node:
         return None
     coll = node.inputs if kind == 'input' else node.outputs
@@ -60,13 +26,21 @@ def _find_sock(node, name, kind='input'):
 
 
 def _link(ng, a, b):
-    """Create a link, logging errors."""
     if not a or not b:
         return
     try:
         ng.links.new(a, b)
-    except Exception as e:
-        _log(f"Link FAIL: {e}")
+    except Exception:
+        pass
+
+
+def _new_node(ng, *ids):
+    for i in ids:
+        try:
+            return ng.nodes.new(i)
+        except Exception:
+            continue
+    return None
 
 
 # ---------------------------------------------------------------------
@@ -74,15 +48,16 @@ def _link(ng, a, b):
 # ---------------------------------------------------------------------
 
 def build_vfx_grade_group():
-    """Create or get the VFX_Grade reusable node group.
+    """Create or get the VFX_Grade node group.
 
-    Chain: GroupInput → CB1(Exp+WB) → CB2(LGG) → HueSat → BrightContrast → GroupOutput
+    Internal chain (all values read from exposed GroupInput sockets):
+      Image → CB1(Exp via gain) → CB2(WB via gain) → CB3(LGG) → HueSat → BrightContrast → Image
     """
     ng = bpy.data.node_groups.get("VFX_Grade")
     if ng:
-        req = {"VFX_CB_EXP_WB", "VFX_CB_LGG", "VFX_HS"}
+        req = {"VFX_CB_EXP", "VFX_CB_WB", "VFX_CB_LGG", "VFX_HS", "VFX_CT"}
         present = {n.name for n in ng.nodes}
-        if req.issubset(present) and len(ng.links) >= 2:
+        if req.issubset(present) and len(ng.links) >= 5:
             return ng
         _log("VFX_Grade invalid, recreating")
         try:
@@ -94,7 +69,7 @@ def build_vfx_grade_group():
     try:
         ng = bpy.data.node_groups.new("VFX_Grade", 'CompositorNodeTree')
     except Exception as e:
-        _log(f"ERROR creating node group: {e}")
+        _log(f"ERROR: {e}")
         return None
 
     # --- Interface sockets ---
@@ -113,137 +88,175 @@ def build_vfx_grade_group():
     ]:
         try:
             ng.interface.new_socket(name, in_out=io, socket_type=st)
-        except Exception as e:
-            _log(f"Socket fail: {name}: {e}")
-
-    defaults = {
-        "Enable": 1, "Exposure": 0, "Temperature": 0, "Tint": 0,
-        "Lift": (0, 0, 0, 1), "Gamma": (0.5, 0.5, 0.5, 1),
-        "Gain": (1, 1, 1, 1), "Saturation": 1, "Contrast": 1,
-    }
+        except Exception:
+            pass
     for item in ng.interface.items_tree:
-        if item.name in defaults and item.in_out == 'INPUT':
-            item.default_value = defaults[item.name]
+        if item.name == "Enable" and item.in_out == 'INPUT':
+            item.default_value = 1
 
-    # --- Nodes ---
     gin = ng.nodes.new("NodeGroupInput")
-    gin.location = (-600, 0)
+    gin.location = (-1200, 0)
     gout = ng.nodes.new("NodeGroupOutput")
-    gout.location = (600, 0)
+    gout.location = (1000, 0)
 
-    # CB1: Exposure + White Balance (via gain)
-    cb1 = None
-    try:
-        cb1 = ng.nodes.new("CompositorNodeColorBalance")
-        cb1.name = "VFX_CB_EXP_WB"
-        cb1.label = "Exp+WB"
-        cb1.location = (-300, 200)
-    except Exception as e:
-        _log(f"CB1 fail: {e}")
+    # --- ColorBalance nodes ---
+    cb1 = _new_node(ng, "CompositorNodeColorBalance")
+    if cb1:
+        cb1.name = "VFX_CB_EXP"; cb1.label = "Exposure"; cb1.location = (-200, 200)
 
-    # CB2: Lift/Gamma/Gain
-    cb2 = None
-    try:
-        cb2 = ng.nodes.new("CompositorNodeColorBalance")
-        cb2.name = "VFX_CB_LGG"
-        cb2.label = "Lift/Gamma/Gain"
-        cb2.location = (0, 200)
-    except Exception as e:
-        _log(f"CB2 fail: {e}")
+    cb2 = _new_node(ng, "CompositorNodeColorBalance")
+    if cb2:
+        cb2.name = "VFX_CB_WB"; cb2.label = "White Balance"; cb2.location = (100, 200)
 
-    # HueSat: Saturation
-    hs = None
-    try:
-        hs = ng.nodes.new("CompositorNodeHueSat")
-        hs.name = "VFX_HS"
-        hs.label = "Saturation"
-        hs.location = (300, 200)
-    except Exception as e:
-        _log(f"HueSat fail: {e}")
+    cb3 = _new_node(ng, "CompositorNodeColorBalance")
+    if cb3:
+        cb3.name = "VFX_CB_LGG"; cb3.label = "Lift/Gamma/Gain"; cb3.location = (400, 200)
 
-    # BrightContrast: Contrast
-    ct = None
-    try:
-        ct = ng.nodes.new("CompositorNodeBrightContrast")
-        ct.name = "VFX_CONTRAST"
-        ct.label = "Contrast"
-        ct.location = (500, 200)
-    except Exception as e:
-        _log(f"BrightContrast fail: {e}")
+    # --- HueSat + BrightContrast ---
+    hs = _new_node(ng, "CompositorNodeHueSat")
+    if hs:
+        hs.name = "VFX_HS"; hs.label = "Saturation"; hs.location = (600, 200)
 
-    # --- Link chain ---
+    ct = _new_node(ng, "CompositorNodeBrightContrast")
+    if ct:
+        ct.name = "VFX_CT"; ct.label = "Contrast"; ct.location = (800, 200)
+
+    # --- Math for Exposure: 2^EV ---
+    mp = _new_node(ng, "CompositorNodeMath")
+    if mp:
+        mp.name = "VFX_POW"; mp.operation = 'POWER'; mp.location = (-600, 400)
+        mp.inputs[0].default_value = 2.0  # base
+
+    # CombineColor: (EV, EV, EV) → color for CB1 gain
+    ce = _new_node(ng, "CompositorNodeCombineColor", "ShaderNodeCombineColor")
+    if ce:
+        ce.name = "VFX_COMB_EXP"; ce.location = (-400, 400)
+
+    # --- Math for White Balance ---
+    # temp_r = 1 + temp, temp_b = 1 - temp, tint_g = 1 + tint
+    ma_r = _new_node(ng, "CompositorNodeMath")
+    if ma_r:
+        ma_r.name = "VFX_ADD_R"; ma_r.operation = 'ADD'; ma_r.location = (-600, 100)
+        ma_r.inputs[1].default_value = 1.0
+
+    ma_g = _new_node(ng, "CompositorNodeMath")
+    if ma_g:
+        ma_g.name = "VFX_ADD_G"; ma_g.operation = 'ADD'; ma_g.location = (-600, 0)
+        ma_g.inputs[1].default_value = 1.0
+
+    ms_b = _new_node(ng, "CompositorNodeMath")
+    if ms_b:
+        ms_b.name = "VFX_SUB_B"; ms_b.operation = 'SUBTRACT'; ms_b.location = (-600, -100)
+        ms_b.inputs[0].default_value = 1.0
+
+    # CombineColor: (temp_r, tint_g, temp_b) → color for CB2 gain
+    cw = _new_node(ng, "CompositorNodeCombineColor", "ShaderNodeCombineColor")
+    if cw:
+        cw.name = "VFX_COMB_WB"; cw.location = (-400, 0)
+
+    # ======== LINKS ========
+
+    # Image chain: gin → CB1 → CB2 → CB3 → HS → CT → gout
     cur = _find_sock(gin, "Image", 'output')
-    for node in (cb1, cb2, hs, ct):
+    for node in (cb1, cb2, cb3, hs, ct):
         if node:
             inp = _find_sock(node, "Image", 'input')
             if inp:
                 _link(ng, cur, inp)
             cur = _find_sock(node, "Image", 'output') or cur
-    out_sock = _find_sock(gout, "Image", 'input')
-    if cur and out_sock:
-        _link(ng, cur, out_sock)
+    if cur:
+        _link(ng, cur, _find_sock(gout, "Image", 'input'))
+
+    # Exposure: gin.Exposure → POW(2,exp) → CombineColor → CB1.Gain
+    _link(ng, _find_sock(gin, "Exposure", 'output'),
+          mp.inputs[1] if mp else None)
+    if mp and ce:
+        _link(ng, mp.outputs[0], ce.inputs[0])
+        _link(ng, mp.outputs[0], ce.inputs[1])
+        if len(ce.inputs) > 2:
+            _link(ng, mp.outputs[0], ce.inputs[2])
+    if ce and cb1:
+        g = _find_sock(cb1, "Gain", 'input')
+        if g:
+            _link(ng, ce.outputs[0], g)
+
+    # White Balance: gin.Temp → ADD_R, gin.Tint → ADD_G, 1-Temp → SUB_B → CombineColor → CB2.Gain
+    _link(ng, _find_sock(gin, "Temperature", 'output'),
+          ma_r.inputs[0] if ma_r else None)
+    _link(ng, _find_sock(gin, "Temperature", 'output'),
+          ms_b.inputs[1] if ms_b else None)
+    _link(ng, _find_sock(gin, "Tint", 'output'),
+          ma_g.inputs[0] if ma_g else None)
+    if ma_r and cw:
+        _link(ng, ma_r.outputs[0], cw.inputs[0])
+    if ma_g and cw:
+        _link(ng, ma_g.outputs[0], cw.inputs[1])
+    if ms_b and cw and len(cw.inputs) > 2:
+        _link(ng, ms_b.outputs[0], cw.inputs[2])
+    if cw and cb2:
+        g = _find_sock(cb2, "Gain", 'input')
+        if g:
+            _link(ng, cw.outputs[0], g)
+
+    # LGG: gin.Lift/Gamma/Gain → CB3.Lift/Gamma/Gain
+    for name in ("Lift", "Gamma", "Gain"):
+        src = _find_sock(gin, name, 'output')
+        dst = _find_sock(cb3, name, 'input')
+        if src and dst:
+            _link(ng, src, dst)
+
+    # Saturation
+    _link(ng, _find_sock(gin, "Saturation", 'output'),
+          _find_sock(hs, "Saturation", 'input') if hs else None)
+
+    # Contrast
+    _link(ng, _find_sock(gin, "Contrast", 'output'),
+          _find_sock(ct, "Contrast", 'input') if ct else None)
 
     _log(f"Created: {len(ng.nodes)} nodes, {len(ng.links)} links")
     return ng
 
 
 # ---------------------------------------------------------------------
-# Apply values
+# Apply values to INPUT SOCKETS (independent per instance)
 # ---------------------------------------------------------------------
 
-def apply_grade_values(grade_node, source):
-    """Set grade socket values from a source (VFXLayer or VFXProject)."""
-    if not grade_node or not grade_node.node_tree:
+def apply_grade_values(grade_node, source, prefix='l_'):
+    """Write values to the grade node's INPUT SOCKETS.
+
+    Each instance (per-layer or master) has its own socket default_values.
+    Changing one instance never affects another.
+    """
+    if not grade_node:
         return
-    ng = grade_node.node_tree
 
-    # CB1: Exposure + White Balance
-    cb1 = ng.nodes.get("VFX_CB_EXP_WB")
-    if cb1:
-        exp = getattr(source, 'l_exposure', 0)
-        temp = getattr(source, 'l_temp', 0)
-        tint = getattr(source, 'l_tint', 0)
-        _safe_set_color(cb1, "gain", _compute_wb_gain(exp, temp, tint))
-        _safe_set_color(cb1, "lift", (0, 0, 0))
-        _safe_set_color(cb1, "gamma", (1, 1, 1))
-
-    # CB2: Lift/Gamma/Gain
-    cb2 = ng.nodes.get("VFX_CB_LGG")
-    if cb2:
-        _safe_set_color(cb2, "lift", getattr(source, 'l_lift', (0, 0, 0)))
-        _safe_set_color(cb2, "gamma", getattr(source, 'l_gamma', (0.5, 0.5, 0.5)))
-        _safe_set_color(cb2, "gain", getattr(source, 'l_gain', (1, 1, 1)))
-
-    # HueSat: Saturation
-    hs = ng.nodes.get("VFX_HS")
-    if hs:
-        for s in hs.inputs:
-            if s.name.lower() == 'saturation':
-                try:
-                    s.default_value = getattr(source, 'l_sat', 1)
-                except Exception:
-                    pass
-
-    # BrightContrast: Contrast
-    # BrightContrast formula: result = (x-0.5)*(contrast/100+1)+0.5
-    # Our formula: (x-0.5)*C+0.5  →  contrast = (C-1)*100
-    ct = ng.nodes.get("VFX_CONTRAST")
-    if ct:
-        c = getattr(source, 'l_contrast', 1)
-        val = (c - 1.0) * 100.0
+    for s in grade_node.inputs:
         try:
-            ct.contrast = val
+            if s.name == 'Exposure':
+                s.default_value = getattr(source, f'{prefix}exposure', 0)
+            elif s.name == 'Temperature':
+                s.default_value = getattr(source, f'{prefix}temp', 0)
+            elif s.name == 'Tint':
+                s.default_value = getattr(source, f'{prefix}tint', 0)
+            elif s.name == 'Lift':
+                v = getattr(source, f'{prefix}lift', (0, 0, 0))
+                s.default_value = tuple(v) + (1.0,) if len(v) == 3 else tuple(v)
+            elif s.name == 'Gamma':
+                v = getattr(source, f'{prefix}gamma', (0.5, 0.5, 0.5))
+                s.default_value = tuple(v) + (1.0,) if len(v) == 3 else tuple(v)
+            elif s.name == 'Gain':
+                v = getattr(source, f'{prefix}gain', (1, 1, 1))
+                s.default_value = tuple(v) + (1.0,) if len(v) == 3 else tuple(v)
+            elif s.name == 'Saturation':
+                s.default_value = getattr(source, f'{prefix}sat', 1)
+            elif s.name == 'Contrast':
+                s.default_value = getattr(source, f'{prefix}contrast', 1)
         except Exception:
-            for s in ct.inputs:
-                if s.name.lower() == 'contrast':
-                    try:
-                        s.default_value = val
-                    except Exception:
-                        pass
+            pass
 
 
 # ---------------------------------------------------------------------
-# Per-layer grades
+# Create / reuse grade nodes in comp tree
 # ---------------------------------------------------------------------
 
 def _create_grade_node(nt, name, label, location):
@@ -274,7 +287,7 @@ def _create_grade_node(nt, name, label, location):
 def ensure_layer_grades(vfx, master, nt):
     """Create per-layer grade nodes. Returns dict {layer_id: grade_node}.
 
-    Also connects source node → grade node for each layer.
+    Each node reads its own l_* properties into input sockets.
     """
     grades = {}
     x = 200
@@ -291,25 +304,27 @@ def ensure_layer_grades(vfx, master, nt):
             f"GRADE: {layer.layer_name}", (x, 0)
         )
         if gn:
-            apply_grade_values(gn, layer)
-            # Connect source → grade
-            source_node = nt.nodes.get(f"VFX_RL_{layer.id}")
-            if source_node:
-                src_out = _find_sock(source_node, "Image", 'output')
-                gr_in = _find_sock(gn, "Image", 'input')
-                if src_out and gr_in:
-                    _link(nt, src_out, gr_in)
+            apply_grade_values(gn, layer, 'l_')
+            # Connect source image → grade
+            src = nt.nodes.get(f"VFX_RL_{layer.id}")
+            if src:
+                so = src.outputs.get("Image")
+                gi = gn.inputs.get("Image")
+                if so and gi:
+                    try:
+                        nt.links.new(so, gi)
+                    except Exception:
+                        pass
             grades[layer.id] = gn
         x += 250
     return grades
 
 
-# ---------------------------------------------------------------------
-# Master grade
-# ---------------------------------------------------------------------
-
 def ensure_master_grade(vfx, master, nt):
-    """Create master grade node. Returns node or None."""
+    """Create master grade node. Returns node or None.
+
+    Reads m_* properties into input sockets.
+    """
     if not getattr(vfx, 'm_grade_enable', False):
         existing = nt.nodes.get("VFX_GRADE_MASTER")
         if existing:
@@ -317,5 +332,5 @@ def ensure_master_grade(vfx, master, nt):
         return None
     gn = _create_grade_node(nt, "VFX_GRADE_MASTER", "MASTER GRADE", (2200, 0))
     if gn:
-        apply_grade_values(gn, vfx)
+        apply_grade_values(gn, vfx, 'm_')
     return gn
