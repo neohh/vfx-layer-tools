@@ -91,23 +91,6 @@ def get_comp_tree(master, create=True):
     return tree
 
 
-def _force_compositor_rebuild(master):
-    """Force Blender's compositor to re-evaluate the node tree.
-
-    Simply modifying nodes/links is NOT enough — Blender caches compositor
-    results and only invalidates on structural changes (add/remove node/link).
-    Property changes on existing nodes are invisible to the cache.
-
-    Strategy: toggle use_nodes off→on which forces a full compositor rebuild.
-    This is the only reliable way in Blender 5.x.
-    """
-    try:
-        was_on = master.use_nodes
-        master.use_nodes = False
-        master.use_nodes = was_on
-    except Exception:
-        pass
-
 
 # ---------------------------------------------------------------------
 # COMP FROM FILES
@@ -485,6 +468,50 @@ def _safe_set(node, name, value):
                 return True
             except Exception:
                 pass
+    return False
+
+
+def _set_socket(node, name, value):
+    """Set an input socket's default_value by name."""
+    for sock in node.inputs:
+        if sock.name == name:
+            try:
+                sock.default_value = value
+                return True
+            except Exception:
+                pass
+    return False
+
+
+def _set_glare_type(node, glare_type):
+    """Set the Glare type via the 'Type' MENU input socket.
+    The addon enum values: BLOOM, FOG_GLOW, STREAKS, GHOSTS
+    Blender socket values: Bloom, Fog Glow, Streaks, Ghosts (display names)
+    """
+    TYPE_MAP = {
+        'BLOOM': 'Bloom',
+        'FOG_GLOW': 'Fog Glow',
+        'STREAKS': 'Streaks',
+        'GHOSTS': 'Ghosts',
+    }
+    socket_name = TYPE_MAP.get(glare_type, glare_type)
+
+    for sock in node.inputs:
+        if sock.name == 'Type':
+            for val in (socket_name, glare_type, glare_type.lower()):
+                try:
+                    sock.default_value = val
+                    return True
+                except Exception:
+                    pass
+            for val in ('Bloom', 'Fog Glow', 'Streaks', 'Ghosts',
+                        'BLOOM', 'FOG_GLOW', 'STREAKS', 'GHOSTS'):
+                try:
+                    sock.default_value = val
+                    return True
+                except Exception:
+                    pass
+            break
     return False
 
 
@@ -1086,32 +1113,20 @@ def build_comp_assembly(vfx, master, nt=None):
         old_gl = nt.nodes.get("VFX_GLARE")
         if old_gl is not None:
             nt.nodes.remove(old_gl)
-        gl = None
-        try:
-            gl = nt.nodes.new("CompositorNodeGlare")
-        except Exception as e:
-            print(f"VFX glare: create FAILED: {e}")
-            gl = None
+        gl = _new_node(nt, "CompositorNodeGlare")
         if gl is not None:
             gl.name = "VFX_GLARE"
             gl.label = "GLARE"
             gl.location = (_PX_GLARE, _PY)
-            # Type — try all common attr names
-            for attr in ("glare_type", "type", "mode"):
-                ok = _safe_set(gl, attr, vfx.glare_type)
-                if ok:
-                    break
-            # Properties — try attr then input socket
-            _safe_set(gl, "strength", vfx.glare_strength)
-            _safe_set(gl, "threshold", vfx.glare_threshold)
-            _safe_set(gl, "size", vfx.glare_size)
-            _safe_set(gl, "mix", 0.0)
+            # Glare TYPE is a MENU input socket, not a node property
+            _set_glare_type(gl, vfx.glare_type)
+            # Threshold, Size, Strength — all via input sockets
+            _set_socket(gl, "Threshold", vfx.glare_threshold)
+            _set_socket(gl, "Size", vfx.glare_size)
+            _set_socket(gl, "Strength", vfx.glare_strength)
             # Connect image input
-            if current is not None and gl.inputs:
-                gin_s = gl.inputs[0]
-                for l in list(gin_s.links):
-                    nt.links.remove(l)
-                nt.links.new(current, gin_s)
+            if gl.inputs:
+                nt.links.new(current, gl.inputs[0])
             if gl.outputs:
                 current = gl.outputs[0]
     else:
@@ -1241,12 +1256,10 @@ def build_comp_assembly(vfx, master, nt=None):
             nt.links.new(view_sock, vsock)
             break
 
-    # Force compositor re-evaluation: toggle use_nodes off→on
-    # This is the ONLY reliable way in Blender 5.x to invalidate
-    # the compositor cache after property changes on nodes
-    _force_compositor_rebuild(master)
-
-    # Also tag UI for redraw
+    try:
+        nt.update_tag()
+    except Exception:
+        pass
     for window in bpy.context.window_manager.windows:
         for area in window.screen.areas:
             area.tag_redraw()
