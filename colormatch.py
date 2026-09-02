@@ -1,8 +1,25 @@
-"""VFX Layer Tools — Color correction / plate matching."""
+"""VFX Layer Tools — Color correction / plate matching.
+
+Blender 5.x compatibility:
+- CompositorNodeColorBalance has no correction_method (always Lift/Gamma/Gain)
+- CompositorNodeMix / CompositorNodeMixRGB don't exist in compositor
+- Strength is applied by blending preset values toward neutral in Python
+"""
 
 import bpy
 import traceback
 
+
+# ---------------------------------------------------------------------
+# NEUTRAL values (passthrough)
+# ---------------------------------------------------------------------
+NEUTRAL = {
+    'lift': (0.0, 0.0, 0.0),
+    'gamma': (1.0, 1.0, 1.0),
+    'gain': (1.0, 1.0, 1.0),
+    'hue': 0.5,
+    'saturation': 1.0,
+}
 
 # ---------------------------------------------------------------------
 # PRESETS: (lift, gamma, gain) RGB tuples + hue/sat adjustments
@@ -12,7 +29,7 @@ PRESETS = {
     'NONE': {
         'label': 'Off',
         'lift': (0.0, 0.0, 0.0),
-        'gamma': (1.0, 1.0, 1.0),     # FIXED: 1.0 is neutral in L/G/G mode, not 0.5
+        'gamma': (1.0, 1.0, 1.0),
         'gain': (1.0, 1.0, 1.0),
         'hue': 0.5,
         'saturation': 1.0,
@@ -56,15 +73,28 @@ def _log(msg):
     print(f"VFX COLORMATCH: {msg}")
 
 
+def _lerp3(a, b, t):
+    """Linearly interpolate two 3-tuples."""
+    return tuple(a[i] + (b[i] - a[i]) * t for i in range(3))
+
+
+def _lerp(a, b, t):
+    """Linearly interpolate two floats."""
+    return a + (b - a) * t
+
+
+# ---------------------------------------------------------------------
+# NODE GROUP: GroupInput → ColorBalance → HueSat → GroupOutput
+# No Mix node — strength is baked into preset values by apply_preset()
+# ---------------------------------------------------------------------
+
 def get_or_create_color_match_group():
     """Get or create the VFX_ColorMatch node group."""
     ng = bpy.data.node_groups.get("VFX_ColorMatch")
     if ng is not None:
-        # Verify internal links are intact; recreate if broken
         if _validate_group(ng):
             _log(f"Existing group OK: {len(ng.nodes)} nodes, {len(ng.links)} links")
             return ng
-        # Links broken — remove and recreate
         _log("Links broken, recreating group")
         try:
             bpy.data.node_groups.remove(ng)
@@ -88,7 +118,6 @@ def get_or_create_color_match_group():
         _log(f"ERROR creating interface sockets: {e}")
         return None
 
-    # Set default for Strength
     for item in ng.interface.items_tree:
         if item.name == "Strength" and item.in_out == 'INPUT':
             item.default_value = 1.0
@@ -98,27 +127,21 @@ def get_or_create_color_match_group():
     gout = ng.nodes.new("NodeGroupOutput")
     gout.location = (400, 0)
 
-    # Color Balance (Lift/Gamma/Gain)
+    # Color Balance (Lift/Gamma/Gain) — no correction_method in Blender 5.x
     cb = None
     try:
         cb = ng.nodes.new("CompositorNodeColorBalance")
         cb.name = "VFX_CB"
         cb.label = "Color Balance"
         cb.location = (-200, 0)
-        # Blender 5.x: correction_method may not exist or may differ
-        try:
-            cb.correction_method = 'LIFT_GAMMA_GAIN'
-        except (AttributeError, TypeError) as e:
-            _log(f"correction_method set failed: {e} — trying without")
     except Exception as e:
         _log(f"ERROR creating CompositorNodeColorBalance: {e}")
         traceback.print_exc()
 
     if cb is not None:
-        # Set neutral defaults so passthrough works when OFF
-        _safe_set_color(cb, "lift", (0.0, 0.0, 0.0))
-        _safe_set_color(cb, "gamma", (1.0, 1.0, 1.0))
-        _safe_set_color(cb, "gain", (1.0, 1.0, 1.0))
+        _safe_set_color(cb, "lift", NEUTRAL['lift'])
+        _safe_set_color(cb, "gamma", NEUTRAL['gamma'])
+        _safe_set_color(cb, "gain", NEUTRAL['gain'])
 
     # Hue/Saturation
     hs = None
@@ -130,40 +153,14 @@ def get_or_create_color_match_group():
     except Exception as e:
         _log(f"ERROR creating CompositorNodeHueSat: {e}")
 
-    # Mix Strength: blend between original and corrected
-    mix = None
-    for mix_type in ("CompositorNodeMix", "CompositorNodeMixRGB"):
-        try:
-            mix = ng.nodes.new(mix_type)
-            _log(f"Mix node created: {mix_type}")
-            break
-        except Exception:
-            continue
-    if mix is None:
-        _log("ERROR: cannot create Mix node for color match")
-        return ng
-    mix.name = "VFX_STRENGTH_MIX"
-    mix.label = "Strength"
-    mix.location = (250, 0)
-    try:
-        mix.data_type = 'RGBA'
-    except Exception:
-        pass
-    try:
-        mix.blend_type = 'MIX'
-    except Exception:
-        pass
-
     # --- Debug: dump all sockets ---
     _dump_sockets(gin, "GroupInput")
     _dump_sockets(cb, "ColorBalance")
     _dump_sockets(hs, "HueSat")
-    _dump_sockets(mix, "Mix")
     _dump_sockets(gout, "GroupOutput")
 
-    # --- Build links ---
+    # --- Build links: GroupInput → ColorBalance → HueSat → GroupOutput ---
     img_in = gin.outputs.get("Image")
-    str_in = gin.outputs.get("Strength")
     img_out = gout.inputs.get("Image")
     link_count = 0
 
@@ -179,169 +176,42 @@ def get_or_create_color_match_group():
         except Exception as e:
             _log(f"Link FAILED {desc}: {e}")
 
-    # Image → ColorBalance input
-    cb_img = _find_best_input(cb, 'Image', 'RGBA')
-    if cb_img is None:
-        cb_img = _find_input_by_name_only(cb, 'Image')
+    # GroupInput.Image → ColorBalance.Image
+    cb_img = _find_input_by_name_only(cb, 'Image')
     _safe_link(img_in, cb_img, "GroupIn.Image -> CB.Image")
 
     # ColorBalance → HueSat
-    cb_out = _find_best_output(cb, 'Image', 'RGBA')
-    if cb_out is None:
-        cb_out = _find_output_by_name_only(cb, 'Image')
-    hs_img = _find_best_input(hs, 'Image', 'RGBA')
-    if hs_img is None:
-        hs_img = _find_input_by_name_only(hs, 'Image')
+    cb_out = _find_output_by_name_only(cb, 'Image')
+    hs_img = _find_input_by_name_only(hs, 'Image')
     _safe_link(cb_out, hs_img, "CB.Image -> HS.Image")
 
-    # HueSat → Mix.B (corrected image)
-    hs_out = _find_best_output(hs, 'Image', 'RGBA')
-    if hs_out is None:
-        hs_out = _find_output_by_name_only(hs, 'Image')
-    mix_b = _find_best_input(mix, 'B', 'RGBA')
-    if mix_b is None:
-        mix_b = _find_best_input(mix, 'Color2', 'RGBA')
-    if mix_b is None:
-        mix_b = _find_first_input_not_name(mix, 'A', 'RGBA')
-    if mix_b is None:
-        mix_b = _find_input_by_name_only(mix, 'B')
-    if mix_b is None:
-        # Nuclear: second non-A input
-        candidates = [s for s in mix.inputs if s.name != 'A' and s.name != 'Factor']
-        mix_b = candidates[0] if candidates else None
-    _safe_link(hs_out, mix_b, "HS.Image -> Mix.B")
-
-    # Original → Mix.A (passthrough)
-    mix_a = _find_best_input(mix, 'A', 'RGBA')
-    if mix_a is None:
-        mix_a = _find_best_input(mix, 'Color1', 'RGBA')
-    if mix_a is None:
-        mix_a = _find_input_by_name_only(mix, 'A')
-    _safe_link(img_in, mix_a, "GroupIn.Image -> Mix.A")
-
-    # Strength → Mix Fac
-    mix_fac = _find_best_input(mix, 'Factor', 'VALUE')
-    if mix_fac is None:
-        mix_fac = _find_best_input(mix, 'Fac', 'VALUE')
-    if mix_fac is None:
-        mix_fac = _find_first_input(mix, 'VALUE')
-    if mix_fac is None:
-        mix_fac = _find_input_by_name_only(mix, 'Factor')
-    _safe_link(str_in, mix_fac, "GroupIn.Strength -> Mix.Fac")
-
-    # Mix → Output
-    mix_out = _find_best_output(mix, 'Image', 'RGBA')
-    if mix_out is None:
-        mix_out = _find_first_output(mix, 'RGBA')
-    if mix_out is None:
-        mix_out = _find_output_by_name_only(mix, 'Image')
-    if mix_out is None and mix.outputs:
-        mix_out = mix.outputs[0]
-    _safe_link(mix_out, img_out, "Mix.Image -> GroupOut.Image")
+    # HueSat → GroupOutput.Image
+    hs_out = _find_output_by_name_only(hs, 'Image')
+    _safe_link(hs_out, img_out, "HS.Image -> GroupOut.Image")
 
     _log(f"Group created: {len(ng.nodes)} nodes, {link_count} links")
     return ng
 
 
 def _validate_group(ng):
-    """Check that the node group has the required internal links."""
-    required = {"VFX_CB", "VFX_HS", "VFX_STRENGTH_MIX"}
+    """Check that the node group has the required internal nodes and links."""
+    required = {"VFX_CB", "VFX_HS"}
     present = {n.name for n in ng.nodes}
     if not required.issubset(present):
         _log(f"Validation FAIL: missing nodes {required - present}")
         return False
-    # Check that there are links (not just nodes)
-    if len(ng.links) < 3:
-        _log(f"Validation FAIL: only {len(ng.links)} links (need >=3)")
+    if len(ng.links) < 2:
+        _log(f"Validation FAIL: only {len(ng.links)} links (need >=2)")
         return False
     return True
 
 
 # ---------------------------------------------------------------------
-# Socket finders — robust for Blender 4.x / 5.x
+# Socket finders — name-first, type-agnostic
 # ---------------------------------------------------------------------
 
-def _socket_matches(sock, sock_type):
-    """Check if a socket matches the desired type (handles Blender 5.x changes)."""
-    if sock.type == sock_type:
-        return True
-    # Blender 5.x may use 'COLOR' instead of 'RGBA'
-    if sock_type == 'RGBA' and sock.type == 'COLOR':
-        return True
-    if sock_type == 'COLOR' and sock.type == 'RGBA':
-        return True
-    return False
-
-
-def _find_best_input(node, name, sock_type):
-    """Find input socket by name first, then by type."""
-    if node is None:
-        return None
-    # 1. Exact name match
-    for s in node.inputs:
-        if s.name == name and _socket_matches(s, sock_type):
-            return s
-    # 2. Case-insensitive name match
-    name_lower = name.lower()
-    for s in node.inputs:
-        if s.name.lower() == name_lower and _socket_matches(s, sock_type):
-            return s
-    # 3. Any socket of the right type
-    for s in node.inputs:
-        if _socket_matches(s, sock_type):
-            return s
-    return None
-
-
-def _find_best_output(node, name, sock_type):
-    """Find output socket by name first, then by type."""
-    if node is None:
-        return None
-    for s in node.outputs:
-        if s.name == name and _socket_matches(s, sock_type):
-            return s
-    name_lower = name.lower()
-    for s in node.outputs:
-        if s.name.lower() == name_lower and _socket_matches(s, sock_type):
-            return s
-    for s in node.outputs:
-        if _socket_matches(s, sock_type):
-            return s
-    return None
-
-
-def _find_first_input(node, sock_type):
-    """Find first input socket of given type."""
-    if node is None:
-        return None
-    for s in node.inputs:
-        if _socket_matches(s, sock_type):
-            return s
-    return None
-
-
-def _find_first_output(node, sock_type):
-    """Find first output socket of given type."""
-    if node is None:
-        return None
-    for s in node.outputs:
-        if _socket_matches(s, sock_type):
-            return s
-    return None
-
-
-def _find_first_input_not_name(node, exclude_name, sock_type):
-    """Find first input socket of given type that does NOT have the given name."""
-    if node is None:
-        return None
-    for s in node.inputs:
-        if _socket_matches(s, sock_type) and s.name != exclude_name:
-            return s
-    return None
-
-
 def _find_input_by_name_only(node, name):
-    """Find input socket by name only, ignoring type. Nuclear fallback."""
+    """Find input socket by name only, ignoring type."""
     if node is None:
         return None
     for s in node.inputs:
@@ -355,7 +225,7 @@ def _find_input_by_name_only(node, name):
 
 
 def _find_output_by_name_only(node, name):
-    """Find output socket by name only, ignoring type. Nuclear fallback."""
+    """Find output socket by name only, ignoring type."""
     if node is None:
         return None
     for s in node.outputs:
@@ -381,10 +251,16 @@ def _dump_sockets(node, label=""):
     _log("\n".join(parts))
 
 
+# ---------------------------------------------------------------------
+# PRESET APPLICATION — strength baked into values (no Mix node)
+# ---------------------------------------------------------------------
+
 def apply_preset(ng, preset_name, strength=1.0):
     """Apply a color correction preset to the VFX_ColorMatch group.
 
-    For NONE: resets to neutral passthrough values.
+    Strength blends preset values toward neutral:
+      strength=0 → neutral (passthrough)
+      strength=1 → full preset
     """
     preset = PRESETS.get(preset_name)
     if preset is None:
@@ -398,39 +274,34 @@ def apply_preset(ng, preset_name, strength=1.0):
         _log("WARN: VFX_CB not found in group")
         return
 
-    # Set Color Balance
-    _safe_set_color(cb, "lift", preset['lift'])
-    _safe_set_color(cb, "gamma", preset['gamma'])
-    _safe_set_color(cb, "gain", preset['gain'])
+    # Blend lift/gamma/gain toward neutral based on strength
+    lift = _lerp3(NEUTRAL['lift'], preset['lift'], strength)
+    gamma = _lerp3(NEUTRAL['gamma'], preset['gamma'], strength)
+    gain = _lerp3(NEUTRAL['gain'], preset['gain'], strength)
+    _safe_set_color(cb, "lift", lift)
+    _safe_set_color(cb, "gamma", gamma)
+    _safe_set_color(cb, "gain", gain)
+    _log(f"  CB lift={lift} gamma={gamma} gain={gain}")
 
-    # Set Hue/Saturation
+    # Blend hue/saturation toward neutral based on strength
     hs = ng.nodes.get("VFX_HS")
     if hs is not None:
+        hue = _lerp(NEUTRAL['hue'], preset.get('hue', 0.5), strength)
+        sat = _lerp(NEUTRAL['saturation'], preset.get('saturation', 1.0), strength)
         for s in hs.inputs:
             if s.name.lower() == 'hue':
                 try:
-                    s.default_value = preset.get('hue', 0.5)
+                    s.default_value = hue
                 except Exception:
                     pass
             if s.name.lower() == 'saturation':
                 try:
-                    s.default_value = preset.get('saturation', 1.0)
+                    s.default_value = sat
                 except Exception:
                     pass
+        _log(f"  HS hue={hue} sat={sat}")
     else:
         _log("WARN: VFX_HS not found in group")
-
-    # Set Strength mix
-    mix = ng.nodes.get("VFX_STRENGTH_MIX")
-    if mix is not None:
-        for s in mix.inputs:
-            if _socket_matches(s, 'VALUE') and not s.is_linked:
-                try:
-                    s.default_value = strength
-                except Exception:
-                    pass
-    else:
-        _log("WARN: VFX_STRENGTH_MIX not found in group")
 
 
 def _safe_set_color(node, attr, rgb):
