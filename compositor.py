@@ -1091,45 +1091,35 @@ def build_comp_assembly(vfx, master, nt=None):
     else:
         _remove_nodes(nt, "VFX_DOF")
 
-    # ── GLOW / GLARE (always recreate for guaranteed sync) ──
-    print(f"VFX glare check: use={getattr(vfx, 'use_glare', False)} type={getattr(vfx, 'glare_type', '?')}")
+    # ── GLOW / GLARE ──
     if getattr(vfx, "use_glare", False):
-        old_gl = nt.nodes.get("VFX_GLARE")
-        if old_gl is not None:
-            nt.nodes.remove(old_gl)
-        gl = _new_node(nt, "CompositorNodeGlare")
-        print(f"VFX glare: node={gl}")
+        gl = nt.nodes.get("VFX_GLARE")
+        if gl is None:
+            try:
+                gl = nt.nodes.new("CompositorNodeGlare")
+                gl.name = "VFX_GLARE"
+                gl.label = "GLARE"
+                gl.location = (_PX_GLARE, _PY)
+            except Exception:
+                gl = None
         if gl is not None:
-            gl.name = "VFX_GLARE"
-            gl.label = "GLARE"
-            gl.location = (_PX_GLARE, _PY)
-            # Type: try every attr × value combo
-            type_set = False
-            for attr in ("glare_type", "type", "mode"):
-                for val in (vfx.glare_type, vfx.glare_type.lower()):
-                    try:
-                        setattr(gl, attr, val)
-                        print(f"VFX glare: set {attr}={val} OK")
-                        type_set = True
-                        break
-                    except Exception as exc:
-                        print(f"VFX glare: {attr}={val} FAILED: {exc}")
-                if type_set:
-                    break
-            # Properties via attr
+            # Type: try common attr names (property or input socket)
+            for attr, val in (("glare_type", vfx.glare_type),
+                              ("mode", vfx.glare_type)):
+                _safe_set(gl, attr, val)
+            # All glare params via _safe_set (handles both attrs + input sockets)
+            _safe_set(gl, "strength", vfx.glare_strength)
             _safe_set(gl, "threshold", vfx.glare_threshold)
             _safe_set(gl, "size", vfx.glare_size)
-            mix_val = 1.0 - (vfx.glare_strength / 2.5)
-            mix_val = max(-1.0, min(1.0, mix_val))
-            _safe_set(gl, "mix", mix_val)
-            # Connect image input
+            _safe_set(gl, "mix", 0.0)
+            # Connect image input (always reconnect)
             if gl.inputs:
-                nt.links.new(current, gl.inputs[0])
-                print(f"VFX glare: connected input from current")
+                gin_s = gl.inputs[0]
+                for l in list(gin_s.links):
+                    nt.links.remove(l)
+                nt.links.new(current, gin_s)
             if gl.outputs:
                 current = gl.outputs[0]
-        else:
-            print("VFX glare: FAILED to create node!")
     else:
         _remove_nodes(nt, "VFX_GLARE")
 
@@ -1270,6 +1260,15 @@ def build_comp_assembly(vfx, master, nt=None):
             vsock = node.inputs.get("Image") or node.inputs[0]
             nt.links.new(view_sock, vsock)
             break
+
+    # Force compositor re-evaluation after all node property changes
+    try:
+        nt.update_tag()
+    except Exception:
+        pass
+    for window in bpy.context.window_manager.windows:
+        for area in window.screen.areas:
+            area.tag_redraw()
 
 
 
