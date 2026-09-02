@@ -165,15 +165,15 @@ def _draw_layer_list(context, layout):
         gr.label(text="GRADE", icon='COLOR')
         if layer.grade_enable:
             gc = gbox.column(align=True)
-            gc.prop(layer, "g_exposure")
-            gc.prop(layer, "g_temp")
-            gc.prop(layer, "g_tint")
-            gc.prop(layer, "g_saturation")
-            gc.prop(layer, "g_contrast")
+            gc.prop(layer, "l_exposure")
+            gc.prop(layer, "l_temp")
+            gc.prop(layer, "l_tint")
+            gc.prop(layer, "l_sat")
+            gc.prop(layer, "l_contrast")
             row_lgg = gc.row(align=True)
-            row_lgg.prop(layer, "g_lift", text="Lift")
-            row_lgg.prop(layer, "g_gamma", text="Gamma")
-            row_lgg.prop(layer, "g_gain", text="Gain")
+            row_lgg.prop(layer, "l_lift", text="Lift")
+            row_lgg.prop(layer, "l_gamma", text="Gamma")
+            row_lgg.prop(layer, "l_gain", text="Gain")
             gbox.operator("vfx.reset_layer_grade", icon='LOOP_BACK')
 
 

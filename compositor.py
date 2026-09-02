@@ -765,6 +765,10 @@ def build_comp_assembly(vfx, master, nt=None):
     grade_nodes = ensure_layer_grades(vfx, master, nt)
     if grade_nodes:
         print(f"VFX grades: {len(grade_nodes)} per-layer grade nodes created")
+        for lid, gn in grade_nodes.items():
+            in_links = [l for l in gn.inputs[0].links] if gn.inputs else []
+            out_links = [l for l in gn.outputs[0].links] if gn.outputs else []
+            print(f"  grade {gn.name}: in_links={len(in_links)} out_links={len(out_links)} inputs={[s.name for s in gn.inputs]} outputs={[s.name for s in gn.outputs]}")
 
     # туман: вся сборка (фог слоев ДО альфа-оверов) внутри группы
     if getattr(vfx, "use_fog", False):
@@ -824,20 +828,30 @@ def build_comp_assembly(vfx, master, nt=None):
                 for entry in meta:
                     lid = entry["id"]
                     lay = entry["layer"]
-                    # Always get source node for Alpha and other sockets
                     ln = nt.nodes.get(f"VFX_RL_{lid}")
-                    # Use grade output if available, otherwise raw source
                     grade_n = grade_nodes.get(lid)
                     if grade_n is not None:
                         src_sock = grade_n.outputs.get("Image")
+                        # Connect source image INTO the grade node first
+                        if ln and ln.outputs.get("Image"):
+                            grade_in = grade_n.inputs.get("Image")
+                            if grade_in is not None:
+                                for l in list(grade_in.links):
+                                    nt.links.remove(l)
+                                nt.links.new(ln.outputs["Image"], grade_in)
+                        print(f"VFX fog->grade: layer={lid} grade={grade_n.name} src={src_sock}")
                     else:
                         src_sock = ln.outputs.get("Image") if ln else None
                     s = gi(f"OBJ_{lid}")
                     if s is not None and src_sock is not None:
                         relink(s, src_sock)
+                    elif s is not None:
+                        print(f"VFX fog WARNING: OBJ_{lid} has no source! ln={ln} grade={grade_n}")
                     s = gi(f"AL_{lid}")
                     if s is not None and ln is not None and ln.outputs.get("Alpha"):
                         relink(s, ln.outputs["Alpha"])
+                    elif s is not None:
+                        print(f"VFX fog WARNING: AL_{lid} has no alpha source! ln={ln}")
                     s = gi(f"F_{lid}")
                     if s is not None:
                         s.default_value = lay.fog_factor
@@ -866,6 +880,17 @@ def build_comp_assembly(vfx, master, nt=None):
 
     # без тумана (или если группа не собралась): старая цепочка миксов
     if not fog_done:
+        # Connect source images INTO grade nodes first
+        for layer_id, grade_n in grade_nodes.items():
+            ln = nt.nodes.get(f"VFX_RL_{layer_id}")
+            if ln and ln.outputs.get("Image"):
+                grade_in = grade_n.inputs.get("Image")
+                if grade_in is not None:
+                    for l in list(grade_in.links):
+                        nt.links.remove(l)
+                    nt.links.new(ln.outputs["Image"], grade_in)
+                    print(f"VFX nofog->grade: layer={layer_id} connected")
+
         # Replace raw source sockets with grade outputs where available
         graded_sockets = []
         for layer, kind, sock in sockets:
