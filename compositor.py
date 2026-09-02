@@ -57,7 +57,6 @@ def get_comp_tree(master, create=True):
     tree = None
     for ng in bpy.data.node_groups:
         if ng.bl_idname == 'CompositorNodeTree':
-            # Skip known VFX sub-groups
             if ng.name.startswith("VFX_") and ng.name != "VFX_Compositor":
                 continue
             tree = ng
@@ -92,6 +91,22 @@ def get_comp_tree(master, create=True):
     return tree
 
 
+def _force_compositor_rebuild(master):
+    """Force Blender's compositor to re-evaluate the node tree.
+
+    Simply modifying nodes/links is NOT enough — Blender caches compositor
+    results and only invalidates on structural changes (add/remove node/link).
+    Property changes on existing nodes are invisible to the cache.
+
+    Strategy: toggle use_nodes off→on which forces a full compositor rebuild.
+    This is the only reliable way in Blender 5.x.
+    """
+    try:
+        was_on = master.use_nodes
+        master.use_nodes = False
+        master.use_nodes = was_on
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------
@@ -116,16 +131,13 @@ def _load_sequence_image(scene_name, base_path):
                     existing.reload()
                 except Exception:
                     pass
-                print(f"VFX SEQ refresh: {img_name} files={len(files)}")
         return existing
 
     if not os.path.isdir(folder):
-        print(f"VFX: folder not found: {folder}")
         return None
 
     files = sorted([f for f in os.listdir(folder) if f.lower().endswith('.exr')])
     if not files:
-        print(f"VFX: no EXR in {folder}")
         return None
 
     first_file = os.path.join(folder, files[0])
@@ -155,7 +167,6 @@ def _load_sequence_image(scene_name, base_path):
     except Exception:
         pass
 
-    print(f"VFX SEQ load: {img_name} <- {folder} files={len(files)} start={start_frame}")
     return img
 
 
@@ -170,7 +181,6 @@ def _load_sequence_image2(scene_name, base_path):
         files = sorted([f for f in os.listdir(folder)
                         if f.lower().endswith('.exr')])
     if not files:
-        print("VFX SEQ2: no EXR in", folder)
         return _load_sequence_image(scene_name, base_path)
 
     start_frame = 1
@@ -211,7 +221,6 @@ def _load_sequence_image2(scene_name, base_path):
     new_imgs = [bpy.data.images[k]
                 for k in (set(bpy.data.images.keys()) - before)]
     if not new_imgs:
-        print("VFX SEQ2: no new image, fallback")
         return _load_sequence_image(scene_name, base_path)
 
     img = new_imgs[0]
@@ -222,8 +231,6 @@ def _load_sequence_image2(scene_name, base_path):
     except Exception:
         pass
 
-    print(f"VFX SEQ2: {img_name} files={len(files)} "
-          f"start={start_frame} frames={getattr(img, 'frame_duration', 1)}")
     return img
 
 
@@ -306,7 +313,6 @@ def rebuild_comp_from_files(vfx, master):
         node["vfx_pass"] = "OBJECT"
         node.location = (0, 500)
 
-    # единая live-карта глубины на всю сцену
     if getattr(vfx, "use_fog", False) or getattr(vfx, "use_blur", False) \
             or getattr(vfx, "use_dof", False):
         _setup_fog_passes(vfx, master, force=True)
@@ -501,7 +507,7 @@ def _get_mist_socket(nt):
 
 
 def _cleanup_fog_nodes(nt):
-    """Remove all VFX_FOG* nodes except VFX_FOG_GROUP (which is managed by build_comp_assembly)."""
+    """Remove all VFX_FOG* nodes except VFX_FOG_GROUP."""
     for node in list(nt.nodes):
         n = node.name
         if n == "VFX_FOG_GROUP":
@@ -550,8 +556,6 @@ def _fog_mix_node(ng, loc):
 
 
 def _build_fog_group2(vfx, has_bg=True):
-    """Вся сборка сцены внутри группы; туман каждого слоя применяется
-    ДО альфа-композитинга - поэтому нет каймы на краях."""
     ng = bpy.data.node_groups.get("VFX_FogGroup")
     if ng is None:
         ng = bpy.data.node_groups.new("VFX_FogGroup", 'CompositorNodeTree')
@@ -713,22 +717,17 @@ def build_comp_assembly(vfx, master, nt=None):
     if nt is None:
         nt = get_comp_tree(master)
     if not nt:
-        print("VFX build_comp: no compositor tree!")
         return
 
-    # Verify this tree is actually attached to the master scene
+    # Verify tree matches scene
     scene_tree = _find_comp_tree_attr(master)
     if scene_tree is not None and scene_tree is not nt:
-        print(f"VFX build_comp: tree mismatch! nt={nt.name} scene_tree={scene_tree.name}, switching")
         nt = scene_tree
-
-    print(f"VFX build_comp: tree={nt.name} nodes={len(nt.nodes)} links={len(nt.links)}")
 
     for node in list(nt.nodes):
         if node.get("vfx_mix"):
             nt.nodes.remove(node)
 
-    # If fog is OFF, remove the old fog group node entirely
     if not getattr(vfx, "use_fog", False):
         fg = nt.nodes.get("VFX_FOG_GROUP")
         if fg is not None:
@@ -771,7 +770,6 @@ def build_comp_assembly(vfx, master, nt=None):
         bg_sock = bgn.outputs["Image"]
 
     if not sockets and bg_sock is None:
-        print("VFX build_comp: no sockets and no BG, returning early")
         return
 
     view_sock = None
@@ -780,7 +778,7 @@ def build_comp_assembly(vfx, master, nt=None):
     # ── PER-LAYER GRADES ──
     grade_nodes = ensure_layer_grades(vfx, master, nt)
 
-    # туман: вся сборка (фог слоев ДО альфа-оверов) внутри группы
+    # туман
     if getattr(vfx, "use_fog", False):
         try:
             _ensure_fogmap(nt, vfx, master)
@@ -842,7 +840,6 @@ def build_comp_assembly(vfx, master, nt=None):
                     grade_n = grade_nodes.get(lid)
                     if grade_n is not None:
                         src_sock = grade_n.outputs.get("Image")
-                        # Connect source image INTO the grade node first
                         if ln and ln.outputs.get("Image"):
                             grade_in = grade_n.inputs.get("Image")
                             if grade_in is not None:
@@ -883,9 +880,8 @@ def build_comp_assembly(vfx, master, nt=None):
             print("VFX fog apply error:", e)
             traceback.print_exc()
 
-    # без тумана (или если группа не собралась): старая цепочка миксов
+    # без тумана
     if not fog_done:
-        # Connect source images INTO grade nodes first
         for layer_id, grade_n in grade_nodes.items():
             ln = nt.nodes.get(f"VFX_RL_{layer_id}")
             if ln and ln.outputs.get("Image"):
@@ -895,7 +891,6 @@ def build_comp_assembly(vfx, master, nt=None):
                         nt.links.remove(l)
                     nt.links.new(ln.outputs["Image"], grade_in)
 
-        # Replace raw source sockets with grade outputs where available
         graded_sockets = []
         for layer, kind, sock in sockets:
             grade_n = grade_nodes.get(layer.id) if kind == 'OBJ' else None
@@ -950,15 +945,13 @@ def build_comp_assembly(vfx, master, nt=None):
         except Exception as e:
             print("VFX cryptomatte error:", e)
 
-    # ── POST-EFFECTS: horizontal chain ──
-
-    _PX_SRC = 800    # source / mix column
-    _PX_BLUR = 1100  # blur chain
-    _PX_DOF = 1400   # depth of field
-    _PX_GLARE = 1700 # glare / bloom
-    _PX_LD = 2000    # lens distortion
-    _PX_OUT = 2300   # composite / viewer
-    _PY = 0          # main chain y
+    # ── POST-EFFECTS ──
+    _PX_BLUR = 1100
+    _PX_DOF = 1400
+    _PX_GLARE = 1700
+    _PX_LD = 2000
+    _PX_OUT = 2300
+    _PY = 0
 
     # ── ATMOSPHERIC BLUR ──
     if getattr(vfx, "use_blur", False):
@@ -1089,7 +1082,7 @@ def build_comp_assembly(vfx, master, nt=None):
 
     # ── GLOW / GLARE ──
     if getattr(vfx, "use_glare", False):
-        # Always destroy and recreate for guaranteed sync with UI
+        # Always destroy and recreate for guaranteed sync
         old_gl = nt.nodes.get("VFX_GLARE")
         if old_gl is not None:
             nt.nodes.remove(old_gl)
@@ -1097,35 +1090,28 @@ def build_comp_assembly(vfx, master, nt=None):
         try:
             gl = nt.nodes.new("CompositorNodeGlare")
         except Exception as e:
-            print(f"VFX glare: FAILED to create node: {e}")
+            print(f"VFX glare: create FAILED: {e}")
             gl = None
         if gl is not None:
             gl.name = "VFX_GLARE"
             gl.label = "GLARE"
             gl.location = (_PX_GLARE, _PY)
-            # Type: try all common attr names for Blender 5.x compat
+            # Type — try all common attr names
             for attr in ("glare_type", "type", "mode"):
                 ok = _safe_set(gl, attr, vfx.glare_type)
                 if ok:
-                    print(f"VFX glare: set {attr}={vfx.glare_type}")
                     break
-            # Strength / threshold / size — try both attrs and input sockets
+            # Properties — try attr then input socket
             _safe_set(gl, "strength", vfx.glare_strength)
             _safe_set(gl, "threshold", vfx.glare_threshold)
             _safe_set(gl, "size", vfx.glare_size)
             _safe_set(gl, "mix", 0.0)
-            # Log all glare properties for debug
-            print(f"VFX glare: strength={vfx.glare_strength} threshold={vfx.glare_threshold} "
-                  f"size={vfx.glare_size} type={vfx.glare_type}")
             # Connect image input
             if current is not None and gl.inputs:
                 gin_s = gl.inputs[0]
                 for l in list(gin_s.links):
                     nt.links.remove(l)
-                link = nt.links.new(current, gin_s)
-                print(f"VFX glare: linked {current.node.name}.{current.name} -> {gin_s.name} ok={link is not None}")
-            else:
-                print(f"VFX glare: NO INPUT! current={current} inputs={len(gl.inputs) if gl.inputs else 0}")
+                nt.links.new(current, gin_s)
             if gl.outputs:
                 current = gl.outputs[0]
     else:
@@ -1169,7 +1155,7 @@ def build_comp_assembly(vfx, master, nt=None):
         if mg_out is not None:
             current = mg_out
 
-    # ── COLOR MATCH (creative look, after master grade) ──
+    # ── COLOR MATCH ──
     if getattr(vfx, "use_color_match", False) and vfx.color_match_preset != 'NONE':
         try:
             from .colormatch import get_or_create_color_match_group, apply_preset
@@ -1203,6 +1189,7 @@ def build_comp_assembly(vfx, master, nt=None):
         except Exception as e:
             print("VFX color match error:", e)
 
+    # ── COMPOSITE OUTPUT ──
     comp = None
     for node in nt.nodes:
         if node.type == 'COMPOSITE':
@@ -1254,21 +1241,15 @@ def build_comp_assembly(vfx, master, nt=None):
             nt.links.new(view_sock, vsock)
             break
 
-    # Force compositor re-evaluation
-    try:
-        nt.update_tag()
-    except Exception:
-        pass
-    # Force depsgraph update to ensure compositor re-evaluates
-    try:
-        bpy.context.view_layer.update()
-    except Exception:
-        pass
+    # Force compositor re-evaluation: toggle use_nodes off→on
+    # This is the ONLY reliable way in Blender 5.x to invalidate
+    # the compositor cache after property changes on nodes
+    _force_compositor_rebuild(master)
+
+    # Also tag UI for redraw
     for window in bpy.context.window_manager.windows:
         for area in window.screen.areas:
             area.tag_redraw()
-
-    print(f"VFX build_comp: done. Final nodes={len(nt.nodes)} links={len(nt.links)}")
 
 
 
