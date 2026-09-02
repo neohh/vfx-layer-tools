@@ -154,55 +154,70 @@ def get_or_create_color_match_group():
     except Exception:
         pass
 
+    # --- Debug: dump all sockets ---
+    _dump_sockets(gin, "GroupInput")
+    _dump_sockets(cb, "ColorBalance")
+    _dump_sockets(hs, "HueSat")
+    _dump_sockets(mix, "Mix")
+    _dump_sockets(gout, "GroupOutput")
+
     # --- Build links ---
     img_in = gin.outputs.get("Image")
     str_in = gin.outputs.get("Strength")
     img_out = gout.inputs.get("Image")
     link_count = 0
 
+    def _safe_link(from_sock, to_sock, desc):
+        nonlocal link_count
+        if from_sock is None or to_sock is None:
+            _log(f"SKIP link {desc}: from={from_sock} to={to_sock}")
+            return
+        try:
+            ng.links.new(from_sock, to_sock)
+            link_count += 1
+            _log(f"Link OK: {desc}")
+        except Exception as e:
+            _log(f"Link FAILED {desc}: {e}")
+
     # Image → ColorBalance input
     cb_img = _find_best_input(cb, 'Image', 'RGBA')
-    if cb_img and img_in:
-        ng.links.new(img_in, cb_img)
-        link_count += 1
-        _log("Link: GroupIn.Image -> CB.Image")
-    else:
-        _log(f"WARN: CB Image input not found (cb_img={cb_img})")
+    if cb_img is None:
+        cb_img = _find_input_by_name_only(cb, 'Image')
+    _safe_link(img_in, cb_img, "GroupIn.Image -> CB.Image")
 
     # ColorBalance → HueSat
     cb_out = _find_best_output(cb, 'Image', 'RGBA')
+    if cb_out is None:
+        cb_out = _find_output_by_name_only(cb, 'Image')
     hs_img = _find_best_input(hs, 'Image', 'RGBA')
-    if cb_out and hs_img:
-        ng.links.new(cb_out, hs_img)
-        link_count += 1
-        _log("Link: CB -> HS.Image")
-    else:
-        _log(f"WARN: CB->HS link failed (cb_out={cb_out}, hs_img={hs_img})")
+    if hs_img is None:
+        hs_img = _find_input_by_name_only(hs, 'Image')
+    _safe_link(cb_out, hs_img, "CB.Image -> HS.Image")
 
     # HueSat → Mix.B (corrected image)
     hs_out = _find_best_output(hs, 'Image', 'RGBA')
+    if hs_out is None:
+        hs_out = _find_output_by_name_only(hs, 'Image')
     mix_b = _find_best_input(mix, 'B', 'RGBA')
     if mix_b is None:
         mix_b = _find_best_input(mix, 'Color2', 'RGBA')
     if mix_b is None:
         mix_b = _find_first_input_not_name(mix, 'A', 'RGBA')
-    if hs_out and mix_b:
-        ng.links.new(hs_out, mix_b)
-        link_count += 1
-        _log("Link: HS -> Mix.B")
-    else:
-        _log(f"WARN: HS->Mix.B failed (hs_out={hs_out}, mix_b={mix_b})")
+    if mix_b is None:
+        mix_b = _find_input_by_name_only(mix, 'B')
+    if mix_b is None:
+        # Nuclear: second non-A input
+        candidates = [s for s in mix.inputs if s.name != 'A' and s.name != 'Factor']
+        mix_b = candidates[0] if candidates else None
+    _safe_link(hs_out, mix_b, "HS.Image -> Mix.B")
 
     # Original → Mix.A (passthrough)
     mix_a = _find_best_input(mix, 'A', 'RGBA')
     if mix_a is None:
         mix_a = _find_best_input(mix, 'Color1', 'RGBA')
-    if mix_a and img_in:
-        ng.links.new(img_in, mix_a)
-        link_count += 1
-        _log("Link: GroupIn.Image -> Mix.A")
-    else:
-        _log(f"WARN: Mix.A link failed (mix_a={mix_a})")
+    if mix_a is None:
+        mix_a = _find_input_by_name_only(mix, 'A')
+    _safe_link(img_in, mix_a, "GroupIn.Image -> Mix.A")
 
     # Strength → Mix Fac
     mix_fac = _find_best_input(mix, 'Factor', 'VALUE')
@@ -210,23 +225,19 @@ def get_or_create_color_match_group():
         mix_fac = _find_best_input(mix, 'Fac', 'VALUE')
     if mix_fac is None:
         mix_fac = _find_first_input(mix, 'VALUE')
-    if mix_fac and str_in:
-        ng.links.new(str_in, mix_fac)
-        link_count += 1
-        _log("Link: GroupIn.Strength -> Mix.Fac")
-    else:
-        _log(f"WARN: Mix.Fac link failed (mix_fac={mix_fac})")
+    if mix_fac is None:
+        mix_fac = _find_input_by_name_only(mix, 'Factor')
+    _safe_link(str_in, mix_fac, "GroupIn.Strength -> Mix.Fac")
 
     # Mix → Output
     mix_out = _find_best_output(mix, 'Image', 'RGBA')
     if mix_out is None:
         mix_out = _find_first_output(mix, 'RGBA')
-    if mix_out and img_out:
-        ng.links.new(mix_out, img_out)
-        link_count += 1
-        _log("Link: Mix -> GroupOut.Image")
-    else:
-        _log(f"WARN: Mix->Output failed (mix_out={mix_out})")
+    if mix_out is None:
+        mix_out = _find_output_by_name_only(mix, 'Image')
+    if mix_out is None and mix.outputs:
+        mix_out = mix.outputs[0]
+    _safe_link(mix_out, img_out, "Mix.Image -> GroupOut.Image")
 
     _log(f"Group created: {len(ng.nodes)} nodes, {link_count} links")
     return ng
@@ -327,6 +338,47 @@ def _find_first_input_not_name(node, exclude_name, sock_type):
         if _socket_matches(s, sock_type) and s.name != exclude_name:
             return s
     return None
+
+
+def _find_input_by_name_only(node, name):
+    """Find input socket by name only, ignoring type. Nuclear fallback."""
+    if node is None:
+        return None
+    for s in node.inputs:
+        if s.name == name:
+            return s
+    name_lower = name.lower()
+    for s in node.inputs:
+        if s.name.lower() == name_lower:
+            return s
+    return None
+
+
+def _find_output_by_name_only(node, name):
+    """Find output socket by name only, ignoring type. Nuclear fallback."""
+    if node is None:
+        return None
+    for s in node.outputs:
+        if s.name == name:
+            return s
+    name_lower = name.lower()
+    for s in node.outputs:
+        if s.name.lower() == name_lower:
+            return s
+    return None
+
+
+def _dump_sockets(node, label=""):
+    """Print all sockets on a node for debugging."""
+    if node is None:
+        _log(f"{label}: node is None")
+        return
+    parts = [f"{label} ({node.bl_idname})"]
+    for s in node.inputs:
+        parts.append(f"  IN: {s.name!r} type={s.type!r}")
+    for s in node.outputs:
+        parts.append(f"  OUT: {s.name!r} type={s.type!r}")
+    _log("\n".join(parts))
 
 
 def apply_preset(ng, preset_name, strength=1.0):

@@ -74,9 +74,14 @@ def diagnose():
         print("  use_nodes = False  <-- Enable compositing first!")
         return
 
-    nt = master.node_tree
+    nt = None
+    for attr in ("node_tree", "compositor_node_tree", "compositing_node_tree"):
+        nt = getattr(master, attr, None)
+        if nt is not None:
+            print(f"  found via {attr}")
+            break
     if nt is None:
-        print("  node_tree = None")
+        print("  node_tree = None (no comp tree found via node_tree/compositor_node_tree/compositing_node_tree)")
         return
 
     print(f"  node_tree: {nt.name}")
