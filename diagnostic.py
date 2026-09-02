@@ -198,8 +198,13 @@ def test_glare_sync():
             nt = getattr(master, attr, None)
             if nt is not None:
                 break
-        if nt is None and master.use_nodes:
-            nt = master.node_tree
+        if nt is None:
+            # Fallback: search bpy.data.node_groups for any CompositorNodeTree
+            for ng in bpy.data.node_groups:
+                if ng.bl_idname == 'CompositorNodeTree':
+                    nt = ng
+                    print(f"  found CompositorNodeTree in bpy.data.node_groups: {ng.name}")
+                    break
         if nt is None:
             print("ERROR: No compositor node tree found")
             bpy.data.node_groups.remove(test_node)
@@ -382,8 +387,13 @@ def diagnose_colormatch():
         nt = getattr(master, attr, None)
         if nt is not None:
             break
-    if nt is None and master.use_nodes:
-        nt = master.node_tree
+    if nt is None:
+        # Fallback: search bpy.data.node_groups for any CompositorNodeTree
+        for ngrp in bpy.data.node_groups:
+            if ngrp.bl_idname == 'CompositorNodeTree':
+                nt = ngrp
+                print(f"  found CompositorNodeTree in bpy.data.node_groups: {ngrp.name}")
+                break
     if nt is None:
         print("  No comp node tree found")
     else:
