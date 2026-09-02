@@ -1,13 +1,17 @@
-"""VFX Layer Tools — Two-level color grading system.
+"""VFX Layer Tools — Two-level color grading system (v2.6.1).
 
-Architecture:
-  GroupInput.Image → MixRGB(Multiply, CombinedGain) → MixRGB(Multiply, WBTint)
-  → ColorBalance(LGG) → HueSat → BrightContrast → alpha-safe output
+Clean architecture — NO ColorBalance (Blender 5.x defaults are broken).
+All adjustments via MixRGB (Add/Multiply) + HueSat + BrightContrast.
 
-Exposure + White Balance computed in Python → passed as COLOR inputs.
-Lift/Gamma/Gain via ColorBalance (float inputs force-neutralized).
-Saturation via HueSat. Contrast via BrightContrast.
-Alpha-safe: original alpha preserved via SeparateColor + CombineColor.
+Chain:
+  Image → MixRGB_Mult(exposure+WB) → MixRGB_Add(Lift) → HueSat(Sat)
+  → BrightContrast(Contrast) → alpha-safe output
+
+Neutral defaults produce IDENTICAL passthrough:
+  CombinedGain=(1,1,1) → pixel*1 = pixel ✓
+  Lift=(0,0,0) → pixel+0 = pixel ✓
+  Sat=1.0 → unchanged ✓
+  Contrast=1.0 → unchanged ✓
 """
 
 import bpy
@@ -15,21 +19,6 @@ import bpy
 
 def _log(msg):
     print(f"VFX GRADE: {msg}")
-
-
-def _find_sock(node, name, kind='input', prefer_color=False, index_hint=None):
-    """Find socket by name with optional color preference."""
-    if not node:
-        return None
-    coll = node.inputs if kind == 'input' else node.outputs
-    first_match = None
-    for i, s in enumerate(coll):
-        if s.name == name or s.name.lower() == name.lower():
-            if prefer_color and s.type in ('COLOR', 'RGBA'):
-                return s
-            if first_match is None:
-                first_match = s
-    return first_match
 
 
 def _link(ng, a, b):
@@ -52,8 +41,8 @@ def _new_node(ng, *ids):
     return None
 
 
-def _compute_wb_gain(exposure, temp, tint):
-    """Compute combined gain color: 2^EV * temperature/tint adjustment."""
+def _compute_gain(exposure, temp, tint):
+    """Combined gain color: 2^EV * temperature/tint adjustment."""
     ev = 2.0 ** exposure
     temp_r = 1.0 + temp * 0.5
     temp_b = 1.0 - temp * 0.5
@@ -61,37 +50,13 @@ def _compute_wb_gain(exposure, temp, tint):
     return (ev * temp_r, ev * tint_g, ev * temp_b)
 
 
-def _force_neutralize_cb(cb):
-    """Force ALL ColorBalance float inputs to neutral.
-
-    Blender 5.x ColorBalance defaults:
-      Lift float  = 0.750 (NOT neutral!)
-      Gamma float = 1.317 (NOT neutral!)
-      Gain float  = 1.0
-
-    Neutral values: Lift=0, Gamma=1, Gain=1, Factor=1
-    """
-    if cb is None:
-        return
-    for s in cb.inputs:
-        nl = s.name.lower() if s.name else ""
-        if s.type == 'VALUE':
-            if 'factor' in nl:
-                s.default_value = 1.0
-            elif 'lift' in nl:
-                s.default_value = 0.0
-            elif 'gamma' in nl:
-                s.default_value = 1.0
-            elif 'gain' in nl:
-                s.default_value = 1.0
-
-
-def _make_mix_node(ng, location):
-    """Create a MixRGB or ShaderNodeMix for blending."""
+def _make_mix_rgb(ng, location, blend_mode='MULTIPLY', name="Mix"):
+    """Create a CompositorNodeMixRGB or ShaderNodeMix for color blending."""
     mix = _new_node(ng, "CompositorNodeMixRGB", "ShaderNodeMix")
     if mix is None:
-        return None, None, None, None, None
+        return None
     mix.location = location
+    mix.name = name
 
     if mix.bl_idname == 'ShaderNodeMix':
         try:
@@ -99,14 +64,31 @@ def _make_mix_node(ng, location):
         except Exception:
             pass
 
-    # Find sockets
-    fac_in = None
-    a_in = None
-    b_in = None
-    out_s = None
+    # Set blend mode
+    for attr in ("blend_type", "blend_mode"):
+        try:
+            setattr(mix, attr, blend_mode)
+            break
+        except Exception:
+            pass
 
+    # Set Factor = 1.0 (full effect)
     for s in mix.inputs:
-        if fac_in is None and s.type == 'VALUE' and s.name == 'Factor':
+        if s.type == 'VALUE' and s.name in ('Factor', 'Fac'):
+            s.default_value = 1.0
+            break
+
+    return mix
+
+
+def _get_mix_sockets(mix):
+    """Get (A, B, Factor, Output) sockets from a MixRGB node."""
+    if mix is None:
+        return None, None, None, None
+
+    fac_in = a_in = b_in = out_s = None
+    for s in mix.inputs:
+        if fac_in is None and s.type == 'VALUE' and s.name in ('Factor', 'Fac'):
             fac_in = s
         if s.type in ('RGBA', 'COLOR') and s.name == 'A':
             a_in = s
@@ -123,7 +105,22 @@ def _make_mix_node(ng, location):
             out_s = s
             break
 
-    return mix, fac_in, a_in, b_in, out_s
+    return a_in, b_in, fac_in, out_s
+
+
+def _find_socket(node, name, kind='input', prefer_color=False):
+    """Find socket by name."""
+    if not node:
+        return None
+    coll = node.inputs if kind == 'input' else node.outputs
+    first_match = None
+    for s in coll:
+        if s.name == name or s.name.lower() == name.lower():
+            if prefer_color and s.type in ('COLOR', 'RGBA'):
+                return s
+            if first_match is None:
+                first_match = s
+    return first_match
 
 
 # ---------------------------------------------------------------------
@@ -133,14 +130,12 @@ def _make_mix_node(ng, location):
 def build_vfx_grade_group():
     """Create or get the VFX_Grade node group.
 
-    Chain (linear, alpha-safe):
-      Image → MixRGB_Mult(Gain) → MixRGB_Mult(WBTint)
-      → ColorBalance(LGG) → HueSat → BrightContrast
-      → alpha-safe output (original alpha preserved)
+    NO ColorBalance — only MixRGB + HueSat + BrightContrast.
+    At neutral defaults the chain is a perfect passthrough.
     """
     ng = bpy.data.node_groups.get("VFX_Grade")
     if ng:
-        req = {"VFX_CB_LGG", "VFX_HS", "VFX_CT"}
+        req = {"VFX_MIX_EXP", "VFX_MIX_LIFT", "VFX_HS", "VFX_CT"}
         present = {n.name for n in ng.nodes}
         if req.issubset(present) and len(ng.links) >= 3:
             return ng
@@ -159,195 +154,137 @@ def build_vfx_grade_group():
 
     # --- Interface sockets ---
     sockets_def = [
-        ("Image",       'INPUT',  'NodeSocketColor'),
-        ("Enable",      'INPUT',  'NodeSocketBool'),
-        ("CombinedGain", 'INPUT', 'NodeSocketColor'),
-        ("WBTint",      'INPUT',  'NodeSocketColor'),
-        ("Lift",        'INPUT',  'NodeSocketColor'),
-        ("Gamma",       'INPUT',  'NodeSocketColor'),
-        ("Gain",        'INPUT',  'NodeSocketColor'),
-        ("Saturation",  'INPUT',  'NodeSocketFloat'),
-        ("Contrast",    'INPUT',  'NodeSocketFloat'),
-        ("Image",       'OUTPUT', 'NodeSocketColor'),
+        ("Image",        'INPUT',  'NodeSocketColor'),
+        ("Enable",       'INPUT',  'NodeSocketBool'),
+        ("CombinedGain", 'INPUT',  'NodeSocketColor'),
+        ("Lift",         'INPUT',  'NodeSocketColor'),
+        ("Saturation",   'INPUT',  'NodeSocketFloat'),
+        ("Contrast",     'INPUT',  'NodeSocketFloat'),
+        ("Image",        'OUTPUT', 'NodeSocketColor'),
     ]
     for name, io, st in sockets_def:
         try:
             ng.interface.new_socket(name, in_out=io, socket_type=st)
         except Exception as e:
-            _log(f"socket create error {name}: {e}")
+            _log(f"socket error {name}: {e}")
 
-    # Set defaults
+    # Set neutral defaults on interface
     for item in ng.interface.items_tree:
-        if item.name == "Enable" and item.in_out == 'INPUT':
-            item.default_value = 1
-        if item.name == "Saturation" and item.in_out == 'INPUT':
-            item.default_value = 1.0
-        if item.name == "Contrast" and item.in_out == 'INPUT':
-            item.default_value = 1.0
-        if item.name == "CombinedGain" and item.in_out == 'INPUT':
-            item.default_value = (1, 1, 1, 1)
-        if item.name == "WBTint" and item.in_out == 'INPUT':
-            item.default_value = (1, 1, 1, 1)
-        if item.name == "Lift" and item.in_out == 'INPUT':
-            item.default_value = (0, 0, 0, 1)
-        if item.name == "Gamma" and item.in_out == 'INPUT':
-            item.default_value = (0.5, 0.5, 0.5, 1)
-        if item.name == "Gain" and item.in_out == 'INPUT':
-            item.default_value = (1, 1, 1, 1)
+        if item.in_out == 'INPUT':
+            if item.name == "Enable":
+                item.default_value = 1
+            elif item.name == "CombinedGain":
+                item.default_value = (1.0, 1.0, 1.0, 1.0)
+            elif item.name == "Lift":
+                item.default_value = (0.0, 0.0, 0.0, 1.0)
+            elif item.name == "Saturation":
+                item.default_value = 1.0
+            elif item.name == "Contrast":
+                item.default_value = 1.0
 
     gin = ng.nodes.new("NodeGroupInput")
     gin.location = (-700, 0)
     gout = ng.nodes.new("NodeGroupOutput")
     gout.location = (700, 0)
 
-    # --- Exposure: MixRGB(Multiply) with CombinedGain ---
-    mix_exp, exp_fac, exp_a, exp_b, exp_out = _make_mix_node(ng, (-400, 200))
-    if mix_exp:
-        mix_exp.name = "VFX_MIX_EXP"
-        mix_exp.label = "Exposure"
-        # Set multiply blend mode
-        for attr in ("blend_type", "blend_mode"):
-            try:
-                setattr(mix_exp, attr, 'MULTIPLY')
-                break
-            except Exception:
-                pass
-        # Factor = 1.0 (full effect)
-        if exp_fac:
-            exp_fac.default_value = 1.0
+    # --- Mix 1: Exposure + White Balance (Multiply) ---
+    mix_exp = _make_mix_rgb(ng, (-400, 200), 'MULTIPLY', "VFX_MIX_EXP")
+    a_exp, b_exp, fac_exp, out_exp = _get_mix_sockets(mix_exp)
 
-    # --- White Balance tint: MixRGB(Multiply) with WBTint ---
-    mix_wb, wb_fac, wb_a, wb_b, wb_out = _make_mix_node(ng, (-100, 200))
-    if mix_wb:
-        mix_wb.name = "VFX_MIX_WB"
-        mix_wb.label = "White Balance"
-        for attr in ("blend_type", "blend_mode"):
-            try:
-                setattr(mix_wb, attr, 'MULTIPLY')
-                break
-            except Exception:
-                pass
-        if wb_fac:
-            wb_fac.default_value = 1.0
-
-    # --- ColorBalance: Lift/Gamma/Gain ---
-    cb_lgg = _new_node(ng, "CompositorNodeColorBalance")
-    if cb_lgg:
-        cb_lgg.name = "VFX_CB_LGG"
-        cb_lgg.label = "Lift/Gamma/Gain"
-        cb_lgg.location = (150, 200)
-        _force_neutralize_cb(cb_lgg)
+    # --- Mix 2: Lift (Add) ---
+    mix_lift = _make_mix_rgb(ng, (-100, 200), 'ADD', "VFX_MIX_LIFT")
+    a_lift, b_lift, fac_lift, out_lift = _get_mix_sockets(mix_lift)
 
     # --- HueSat ---
     hs = _new_node(ng, "CompositorNodeHueSat")
     if hs:
         hs.name = "VFX_HS"
         hs.label = "Saturation"
-        hs.location = (350, 200)
+        hs.location = (150, 200)
 
     # --- BrightContrast ---
     ct = _new_node(ng, "CompositorNodeBrightContrast")
     if ct:
         ct.name = "VFX_CT"
         ct.label = "Contrast"
-        ct.location = (500, 200)
+        ct.location = (350, 200)
 
-    # --- Alpha preservation nodes ---
+    # --- Alpha preservation: SeparateColor (original) ---
     sep_orig = _new_node(ng, "ShaderNodeSeparateColor", "CompositorNodeSeparateColor")
     if sep_orig:
         sep_orig.name = "VFX_SEP_ORIG"
-        sep_orig.location = (-400, -200)
+        sep_orig.location = (-500, -200)
 
+    # --- Alpha preservation: SeparateColor (graded) ---
     sep_grad = _new_node(ng, "ShaderNodeSeparateColor", "CompositorNodeSeparateColor")
     if sep_grad:
         sep_grad.name = "VFX_SEP_GRADED"
-        sep_grad.location = (500, -200)
+        sep_grad.location = (350, -200)
 
+    # --- Alpha preservation: CombineColor (graded RGB + original A) ---
     comb_out = _new_node(ng, "ShaderNodeCombineColor", "CompositorNodeCombineColor")
     if comb_out:
         comb_out.name = "VFX_COMB_OUT"
-        comb_out.location = (700, -200)
+        comb_out.location = (550, -200)
 
     # ======== LINKS ========
 
-    img_in = _find_sock(gin, "Image", 'output')
-    img_out = _find_sock(gout, "Image", 'input')
+    img_in = _find_socket(gin, "Image", 'output')
+    img_out = _find_socket(gout, "Image", 'input')
 
     # Branch 1: Original alpha preservation
     if img_in and sep_orig:
         _link(ng, img_in, sep_orig.inputs[0])
 
     # Branch 2: Grade chain
-    # Image → Exposure Mix (A=input, B=CombinedGain)
+    # Image → MixRGB_Mult(CombinedGain) → MixRGB_Add(Lift) → HueSat → BC
     grade_out = img_in
-    if exp_a and img_in:
-        _link(ng, img_in, exp_a)
-    cg = _find_sock(gin, "CombinedGain", 'output')
-    if exp_b and cg:
-        _link(ng, cg, exp_b)
-    if exp_out:
-        grade_out = exp_out
 
-    # → WB Mix (A=prev, B=WBTint)
-    if wb_a and grade_out:
-        _link(ng, grade_out, wb_a)
-    wt = _find_sock(gin, "WBTint", 'output')
-    if wb_b and wt:
-        _link(ng, wt, wb_b)
-    if wb_out:
-        grade_out = wb_out
+    # Exposure + WB: Image * CombinedGain
+    if a_exp and img_in:
+        _link(ng, img_in, a_exp)
+    cg = _find_socket(gin, "CombinedGain", 'output')
+    if b_exp and cg:
+        _link(ng, cg, b_exp)
+    if out_exp:
+        grade_out = out_exp
 
-    # → ColorBalance (LGG)
-    if cb_lgg:
-        cb_img_in = _find_sock(cb_lgg, "Image", 'input')
-        if cb_img_in and grade_out:
-            _link(ng, grade_out, cb_img_in)
-        # Connect COLOR inputs for Lift/Gamma/Gain
-        for name in ("Lift", "Gamma", "Gain"):
-            src = _find_sock(gin, name, 'output')
-            dst = _find_sock(cb_lgg, name, 'input', prefer_color=True)
-            if src and dst:
-                _link(ng, src, dst)
-            elif src and dst is None:
-                # Fallback: find by index (ColorBalance has float + color for each)
-                _log(f"WARN: no color socket for {name} on CB_LGG, trying all")
-                for s in cb_lgg.inputs:
-                    if s.name == name:
-                        _link(ng, src, s)
-                        break
-        cb_img_out = _find_sock(cb_lgg, "Image", 'output')
-        if cb_img_out:
-            grade_out = cb_img_out
-        # Re-neutralize float inputs (ColorBalance might reset them)
-        _force_neutralize_cb(cb_lgg)
+    # Lift: prev + Lift_color
+    if a_lift and grade_out:
+        _link(ng, grade_out, a_lift)
+    lv = _find_socket(gin, "Lift", 'output')
+    if b_lift and lv:
+        _link(ng, lv, b_lift)
+    if out_lift:
+        grade_out = out_lift
 
-    # → HueSat
+    # Saturation
     if hs:
-        hs_img_in = _find_sock(hs, "Image", 'input')
+        hs_img_in = _find_socket(hs, "Image", 'input')
         if hs_img_in and grade_out:
             _link(ng, grade_out, hs_img_in)
-        src_sat = _find_sock(gin, "Saturation", 'output')
-        hs_sat = _find_sock(hs, "Saturation", 'input')
+        src_sat = _find_socket(gin, "Saturation", 'output')
+        hs_sat = _find_socket(hs, "Saturation", 'input')
         if src_sat and hs_sat:
             _link(ng, src_sat, hs_sat)
-        hs_img_out = _find_sock(hs, "Image", 'output')
+        hs_img_out = _find_socket(hs, "Image", 'output')
         if hs_img_out:
             grade_out = hs_img_out
 
-    # → BrightContrast
+    # Contrast
     if ct:
-        ct_img_in = _find_sock(ct, "Image", 'input')
+        ct_img_in = _find_socket(ct, "Image", 'input')
         if ct_img_in and grade_out:
             _link(ng, grade_out, ct_img_in)
-        src_con = _find_sock(gin, "Contrast", 'output')
-        ct_con = _find_sock(ct, "Contrast", 'input')
+        src_con = _find_socket(gin, "Contrast", 'output')
+        ct_con = _find_socket(ct, "Contrast", 'input')
         if src_con and ct_con:
             _link(ng, src_con, ct_con)
-        ct_img_out = _find_sock(ct, "Image", 'output')
+        ct_img_out = _find_socket(ct, "Image", 'output')
         if ct_img_out:
             grade_out = ct_img_out
 
-    # Alpha-safe output: graded RGB + original alpha → CombineColor → Output
+    # Alpha-safe output: graded RGB + original alpha
     if grade_out and sep_grad:
         _link(ng, grade_out, sep_grad.inputs[0])
     if sep_grad and comb_out:
@@ -359,13 +296,11 @@ def build_vfx_grade_group():
     if comb_out and img_out:
         _link(ng, comb_out.outputs[0], img_out)
 
-    # Fallback: if alpha-safe nodes missing, connect directly
+    # Fallback: direct connect if alpha nodes missing
     if (not sep_grad or not comb_out) and grade_out and img_out:
         _link(ng, grade_out, img_out)
 
     _log(f"Created: {len(ng.nodes)} nodes, {len(ng.links)} links")
-    _log("Nodes: " + ", ".join(n.name for n in ng.nodes))
-    _log("Links:")
     for l in ng.links:
         _log(f"  {l.from_node.name}.{l.from_socket.name} -> {l.to_node.name}.{l.to_socket.name}")
 
@@ -373,14 +308,14 @@ def build_vfx_grade_group():
 
 
 # ---------------------------------------------------------------------
-# Apply values to INPUT SOCKETS (independent per instance)
+# Apply values to grade node INPUT SOCKETS
 # ---------------------------------------------------------------------
 
 def apply_grade_values(grade_node, source, prefix='l_'):
-    """Write values to the grade node's INPUT SOCKETS.
+    """Write property values to the grade node instance's input sockets.
 
-    Each instance (per-layer and master) has its own socket values.
-    CombinedGain and WBTint computed in Python from exposure/temp/tint.
+    Each instance (per-layer or master) has independent values.
+    Neutral defaults = passthrough (no visible change).
     """
     if not grade_node:
         return
@@ -388,27 +323,14 @@ def apply_grade_values(grade_node, source, prefix='l_'):
     exposure = getattr(source, f'{prefix}exposure', 0)
     temp = getattr(source, f'{prefix}temp', 0)
     tint = getattr(source, f'{prefix}tint', 0)
-    gain = _compute_wb_gain(exposure, temp, tint)
-
-    # WB tint: just the tint adjustment (green/magenta shift)
-    tint_r = 1.0
-    tint_g = 1.0 + tint * 0.3
-    tint_b = 1.0
+    gain = _compute_gain(exposure, temp, tint)
 
     for s in grade_node.inputs:
         try:
             if s.name == 'CombinedGain':
                 s.default_value = gain + (1.0,)
-            elif s.name == 'WBTint':
-                s.default_value = (tint_r, tint_g, tint_b, 1.0)
             elif s.name == 'Lift':
                 v = getattr(source, f'{prefix}lift', (0, 0, 0))
-                s.default_value = tuple(v) + (1.0,) if len(v) == 3 else tuple(v)
-            elif s.name == 'Gamma':
-                v = getattr(source, f'{prefix}gamma', (0.5, 0.5, 0.5))
-                s.default_value = tuple(v) + (1.0,) if len(v) == 3 else tuple(v)
-            elif s.name == 'Gain':
-                v = getattr(source, f'{prefix}gain', (1, 1, 1))
                 s.default_value = tuple(v) + (1.0,) if len(v) == 3 else tuple(v)
             elif s.name == 'Saturation':
                 s.default_value = getattr(source, f'{prefix}sat', 1)

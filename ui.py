@@ -172,7 +172,6 @@ def _draw_layer_list(context, layout):
             gc.prop(layer, "l_contrast")
             row_lgg = gc.row(align=True)
             row_lgg.prop(layer, "l_lift", text="Lift")
-            row_lgg.prop(layer, "l_gamma", text="Gamma")
             row_lgg.prop(layer, "l_gain", text="Gain")
             gbox.operator("vfx.reset_layer_grade", icon='LOOP_BACK')
 
@@ -267,7 +266,6 @@ def _draw_post_effects(context, layout):
         mgc.prop(vfx, "m_contrast")
         row_lgg = mgc.row(align=True)
         row_lgg.prop(vfx, "m_lift", text="Lift")
-        row_lgg.prop(vfx, "m_gamma", text="Gamma")
         row_lgg.prop(vfx, "m_gain", text="Gain")
         row_btn = mgbox.row(align=True)
         row_btn.operator("vfx.reset_master_grade", icon='LOOP_BACK')

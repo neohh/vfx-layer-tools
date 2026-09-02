@@ -1,14 +1,14 @@
 bl_info = {
     "name": "VFX Layer Tools",
     "author": "VFX Pipeline",
-    "version": (2, 6, 0),
+    "version": (2, 6, 1),
     "blender": (5, 1, 0),
     "location": "View3D > Sidebar > VFX",
     "description": "VFX layer / scene / compositing manager",
     "category": "Compositing",
 }
 
-VFX_VERSION = "2.6.0"
+VFX_VERSION = "2.6.1"
 
 import bpy
 import importlib
@@ -194,11 +194,6 @@ class VFXLayer(bpy.types.PropertyGroup):
     l_lift: FloatVectorProperty(
         name="Lift", subtype='COLOR', size=3,
         default=(0.0, 0.0, 0.0), min=0.0, max=1.0,
-        update=lambda s, c: _trigger_comp(c)
-    )
-    l_gamma: FloatVectorProperty(
-        name="Gamma", subtype='COLOR', size=3,
-        default=(0.5, 0.5, 0.5), min=0.0, max=1.0,
         update=lambda s, c: _trigger_comp(c)
     )
     l_gain: FloatVectorProperty(
@@ -456,11 +451,6 @@ class VFXProject(bpy.types.PropertyGroup):
     m_lift: FloatVectorProperty(
         name="M: Lift", subtype='COLOR', size=3,
         default=(0.0, 0.0, 0.0), min=0.0, max=1.0,
-        update=lambda s, c: _trigger_comp(c)
-    )
-    m_gamma: FloatVectorProperty(
-        name="M: Gamma", subtype='COLOR', size=3,
-        default=(0.5, 0.5, 0.5), min=0.0, max=1.0,
         update=lambda s, c: _trigger_comp(c)
     )
     m_gain: FloatVectorProperty(

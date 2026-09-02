@@ -1002,7 +1002,6 @@ class VFX_OT_reset_layer_grade(bpy.types.Operator):
         layer.l_temp = 0.0
         layer.l_tint = 0.0
         layer.l_lift = (0.0, 0.0, 0.0)
-        layer.l_gamma = (0.5, 0.5, 0.5)
         layer.l_gain = (1.0, 1.0, 1.0)
         layer.l_sat = 1.0
         layer.l_contrast = 1.0
@@ -1022,7 +1021,6 @@ class VFX_OT_reset_master_grade(bpy.types.Operator):
         vfx.m_temp = 0.0
         vfx.m_tint = 0.0
         vfx.m_lift = (0.0, 0.0, 0.0)
-        vfx.m_gamma = (0.5, 0.5, 0.5)
         vfx.m_gain = (1.0, 1.0, 1.0)
         vfx.m_saturation = 1.0
         vfx.m_contrast = 1.0
@@ -1046,7 +1044,6 @@ class VFX_OT_copy_master_grade(bpy.types.Operator):
             layer.l_temp = vfx.m_temp
             layer.l_tint = vfx.m_tint
             layer.l_lift = vfx.m_lift[:]
-            layer.l_gamma = vfx.m_gamma[:]
             layer.l_gain = vfx.m_gain[:]
             layer.l_sat = vfx.m_saturation
             layer.l_contrast = vfx.m_contrast
