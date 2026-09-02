@@ -253,27 +253,7 @@ def _draw_post_effects(context, layout):
         lc.prop(vfx, "lensdist_distort")
         lc.prop(vfx, "lensdist_disperse")
 
-    # ── COLOR MATCH ──
-    cmbox = layout.box()
-    cmr = cmbox.row(align=True)
-    cmr.prop(vfx, "use_color_match", text="")
-    cmr.label(text="COLOR MATCH", icon='COLOR')
-    if vfx.use_color_match:
-        cmc = cmbox.column(align=True)
-        cmc.prop(vfx, "color_match_preset", text="")
-        cmc.prop(vfx, "color_match_strength")
-
-    # ── CRYPTOMATTE ──
-    crypto_box = layout.box()
-    cryptor = crypto_box.row(align=True)
-    cryptor.prop(vfx, "use_cryptomatte", text="")
-    cryptor.label(text="CRYPTOMATTE", icon='NODETREE')
-    if vfx.use_cryptomatte:
-        cryptor.operator("vfx.enable_cryptomatte", text="", icon='FILE_REFRESH')
-    else:
-        cryptor.operator("vfx.enable_cryptomatte", text="Enable", icon='ADD')
-
-    # ── MASTER GRADE ──
+    # ── MASTER GRADE (primary correction, applied first in chain) ──
     mgbox = layout.box()
     mgr = mgbox.row(align=True)
     mgr.prop(vfx, "m_grade_enable", text="")
@@ -292,6 +272,26 @@ def _draw_post_effects(context, layout):
         row_btn = mgbox.row(align=True)
         row_btn.operator("vfx.reset_master_grade", icon='LOOP_BACK')
         row_btn.operator("vfx.copy_master_grade", icon='COPYDOWN')
+
+    # ── CRYPTOMATTE ──
+    crypto_box = layout.box()
+    cryptor = crypto_box.row(align=True)
+    cryptor.prop(vfx, "use_cryptomatte", text="")
+    cryptor.label(text="CRYPTOMATTE", icon='NODETREE')
+    if vfx.use_cryptomatte:
+        cryptor.operator("vfx.enable_cryptomatte", text="", icon='FILE_REFRESH')
+    else:
+        cryptor.operator("vfx.enable_cryptomatte", text="Enable", icon='ADD')
+
+    # ── COLOR MATCH (creative look, applied after master grade) ──
+    cmbox = layout.box()
+    cmr = cmbox.row(align=True)
+    cmr.prop(vfx, "use_color_match", text="")
+    cmr.label(text="COLOR MATCH", icon='COLOR')
+    if vfx.use_color_match:
+        cmc = cmbox.column(align=True)
+        cmc.prop(vfx, "color_match_preset", text="")
+        cmc.prop(vfx, "color_match_strength")
 
 
 def _draw_render_settings(context, layout):

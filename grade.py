@@ -200,9 +200,9 @@ def apply_grade_values(grade_node, source):
     # CB1: Exposure + White Balance
     cb1 = ng.nodes.get("VFX_CB_EXP_WB")
     if cb1:
-        exp = getattr(source, 'g_exposure', 0)
-        temp = getattr(source, 'g_temp', 0)
-        tint = getattr(source, 'g_tint', 0)
+        exp = getattr(source, 'l_exposure', 0)
+        temp = getattr(source, 'l_temp', 0)
+        tint = getattr(source, 'l_tint', 0)
         _safe_set_color(cb1, "gain", _compute_wb_gain(exp, temp, tint))
         _safe_set_color(cb1, "lift", (0, 0, 0))
         _safe_set_color(cb1, "gamma", (1, 1, 1))
@@ -210,9 +210,9 @@ def apply_grade_values(grade_node, source):
     # CB2: Lift/Gamma/Gain
     cb2 = ng.nodes.get("VFX_CB_LGG")
     if cb2:
-        _safe_set_color(cb2, "lift", getattr(source, 'g_lift', (0, 0, 0)))
-        _safe_set_color(cb2, "gamma", getattr(source, 'g_gamma', (0.5, 0.5, 0.5)))
-        _safe_set_color(cb2, "gain", getattr(source, 'g_gain', (1, 1, 1)))
+        _safe_set_color(cb2, "lift", getattr(source, 'l_lift', (0, 0, 0)))
+        _safe_set_color(cb2, "gamma", getattr(source, 'l_gamma', (0.5, 0.5, 0.5)))
+        _safe_set_color(cb2, "gain", getattr(source, 'l_gain', (1, 1, 1)))
 
     # HueSat: Saturation
     hs = ng.nodes.get("VFX_HS")
@@ -220,7 +220,7 @@ def apply_grade_values(grade_node, source):
         for s in hs.inputs:
             if s.name.lower() == 'saturation':
                 try:
-                    s.default_value = getattr(source, 'g_saturation', 1)
+                    s.default_value = getattr(source, 'l_sat', 1)
                 except Exception:
                     pass
 
@@ -229,7 +229,7 @@ def apply_grade_values(grade_node, source):
     # Our formula: (x-0.5)*C+0.5  →  contrast = (C-1)*100
     ct = ng.nodes.get("VFX_CONTRAST")
     if ct:
-        c = getattr(source, 'g_contrast', 1)
+        c = getattr(source, 'l_contrast', 1)
         val = (c - 1.0) * 100.0
         try:
             ct.contrast = val

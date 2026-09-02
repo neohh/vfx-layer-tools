@@ -179,38 +179,38 @@ class VFXLayer(bpy.types.PropertyGroup):
         default=False,
         update=lambda s, c: _trigger_comp(c)
     )
-    g_exposure: FloatProperty(
+    l_exposure: FloatProperty(
         name="Exposure", default=0.0, min=-6.0, max=6.0,
         update=lambda s, c: _trigger_comp(c)
     )
-    g_temp: FloatProperty(
+    l_temp: FloatProperty(
         name="Temperature", default=0.0, min=-1.0, max=1.0,
         update=lambda s, c: _trigger_comp(c)
     )
-    g_tint: FloatProperty(
+    l_tint: FloatProperty(
         name="Tint", default=0.0, min=-1.0, max=1.0,
         update=lambda s, c: _trigger_comp(c)
     )
-    g_lift: FloatVectorProperty(
+    l_lift: FloatVectorProperty(
         name="Lift", subtype='COLOR', size=3,
         default=(0.0, 0.0, 0.0), min=0.0, max=1.0,
         update=lambda s, c: _trigger_comp(c)
     )
-    g_gamma: FloatVectorProperty(
+    l_gamma: FloatVectorProperty(
         name="Gamma", subtype='COLOR', size=3,
         default=(0.5, 0.5, 0.5), min=0.0, max=1.0,
         update=lambda s, c: _trigger_comp(c)
     )
-    g_gain: FloatVectorProperty(
+    l_gain: FloatVectorProperty(
         name="Gain", subtype='COLOR', size=3,
         default=(1.0, 1.0, 1.0), min=0.0, max=2.0,
         update=lambda s, c: _trigger_comp(c)
     )
-    g_saturation: FloatProperty(
+    l_sat: FloatProperty(
         name="Saturation", default=1.0, min=0.0, max=2.0,
         update=lambda s, c: _trigger_comp(c)
     )
-    g_contrast: FloatProperty(
+    l_contrast: FloatProperty(
         name="Contrast", default=1.0, min=0.0, max=2.0,
         update=lambda s, c: _trigger_comp(c)
     )

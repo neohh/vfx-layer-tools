@@ -998,14 +998,14 @@ class VFX_OT_reset_layer_grade(bpy.types.Operator):
         if not layer:
             self.report({'ERROR'}, "No active layer")
             return {'CANCELLED'}
-        layer.g_exposure = 0.0
-        layer.g_temp = 0.0
-        layer.g_tint = 0.0
-        layer.g_lift = (0.0, 0.0, 0.0)
-        layer.g_gamma = (0.5, 0.5, 0.5)
-        layer.g_gain = (1.0, 1.0, 1.0)
-        layer.g_saturation = 1.0
-        layer.g_contrast = 1.0
+        layer.l_exposure = 0.0
+        layer.l_temp = 0.0
+        layer.l_tint = 0.0
+        layer.l_lift = (0.0, 0.0, 0.0)
+        layer.l_gamma = (0.5, 0.5, 0.5)
+        layer.l_gain = (1.0, 1.0, 1.0)
+        layer.l_sat = 1.0
+        layer.l_contrast = 1.0
         rebuild_comp(vfx, master)
         self.report({'INFO'}, "Layer grade reset")
         return {'FINISHED'}
@@ -1042,14 +1042,14 @@ class VFX_OT_copy_master_grade(bpy.types.Operator):
             if not layer.enabled:
                 continue
             layer.grade_enable = True
-            layer.g_exposure = vfx.m_exposure
-            layer.g_temp = vfx.m_temp
-            layer.g_tint = vfx.m_tint
-            layer.g_lift = vfx.m_lift[:]
-            layer.g_gamma = vfx.m_gamma[:]
-            layer.g_gain = vfx.m_gain[:]
-            layer.g_saturation = vfx.m_saturation
-            layer.g_contrast = vfx.m_contrast
+            layer.l_exposure = vfx.m_exposure
+            layer.l_temp = vfx.m_temp
+            layer.l_tint = vfx.m_tint
+            layer.l_lift = vfx.m_lift[:]
+            layer.l_gamma = vfx.m_gamma[:]
+            layer.l_gain = vfx.m_gain[:]
+            layer.l_sat = vfx.m_saturation
+            layer.l_contrast = vfx.m_contrast
         rebuild_comp(vfx, master)
         self.report({'INFO'}, f"Copied master grade to {len(vfx.layers)} layers")
         return {'FINISHED'}

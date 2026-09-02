@@ -912,54 +912,6 @@ def build_comp_assembly(vfx, master, nt=None):
             current = outs[0] if outs else mix.outputs[0]
             mix_index += 1
 
-    # ── COLOR MATCH ──
-    print(f"VFX color match check: use={getattr(vfx, 'use_color_match', False)} preset={getattr(vfx, 'color_match_preset', 'NONE')}")
-    if getattr(vfx, "use_color_match", False) and vfx.color_match_preset != 'NONE':
-        try:
-            from .colormatch import get_or_create_color_match_group, apply_preset
-            cm_ng = get_or_create_color_match_group()
-            print(f"VFX color match: node_group={cm_ng}")
-            if cm_ng is not None:
-                apply_preset(cm_ng, vfx.color_match_preset, vfx.color_match_strength)
-                cm_node = nt.nodes.get("VFX_COLORMATCH")
-                if cm_node is None:
-                    for bid in ("CompositorNodeGroup", "ShaderNodeGroup", "NodeGroup"):
-                        try:
-                            cm_node = nt.nodes.new(bid)
-                            print(f"VFX color match: created node via {bid} = {cm_node}")
-                            break
-                        except Exception as exc:
-                            print(f"VFX color match: {bid} failed: {exc}")
-                            continue
-                    if cm_node is not None:
-                        cm_node.name = "VFX_COLORMATCH"
-                if cm_node is not None:
-                    cm_node.label = "COLOR MATCH"
-                    cm_node.node_tree = cm_ng
-                    cm_node.location = (700, 500)
-                    cm_in_img = cm_node.inputs.get("Image")
-                    cm_in_str = cm_node.inputs.get("Strength")
-                    cm_out = cm_node.outputs.get("Image")
-                    print(f"VFX color match: img_in={cm_in_img} str_in={cm_in_str} out={cm_out}")
-                    if cm_in_img is not None and cm_out is not None:
-                        for l in list(cm_in_img.links):
-                            nt.links.remove(l)
-                        nt.links.new(current, cm_in_img)
-                        if cm_in_str is not None:
-                            cm_in_str.default_value = vfx.color_match_strength
-                        current = cm_out
-                        print("VFX color match: CONNECTED OK")
-                    else:
-                        print("VFX color match: FAILED to find sockets!")
-                else:
-                    print("VFX color match: FAILED to create node!")
-            else:
-                print("VFX color match: FAILED to get/create node group!")
-        except Exception as e:
-            import traceback
-            print("VFX color match error:", e)
-            traceback.print_exc()
-
     # ── CRYPTOMATTE ──
     if getattr(vfx, "use_cryptomatte", False):
         try:
@@ -1193,6 +1145,54 @@ def build_comp_assembly(vfx, master, nt=None):
         mg_out = mg.outputs.get("Image")
         if mg_out is not None:
             current = mg_out
+
+    # ── COLOR MATCH (creative look, after master grade) ──
+    print(f"VFX color match check: use={getattr(vfx, 'use_color_match', False)} preset={getattr(vfx, 'color_match_preset', 'NONE')}")
+    if getattr(vfx, "use_color_match", False) and vfx.color_match_preset != 'NONE':
+        try:
+            from .colormatch import get_or_create_color_match_group, apply_preset
+            cm_ng = get_or_create_color_match_group()
+            print(f"VFX color match: node_group={cm_ng}")
+            if cm_ng is not None:
+                apply_preset(cm_ng, vfx.color_match_preset, vfx.color_match_strength)
+                cm_node = nt.nodes.get("VFX_COLORMATCH")
+                if cm_node is None:
+                    for bid in ("CompositorNodeGroup", "ShaderNodeGroup", "NodeGroup"):
+                        try:
+                            cm_node = nt.nodes.new(bid)
+                            print(f"VFX color match: created node via {bid} = {cm_node}")
+                            break
+                        except Exception as exc:
+                            print(f"VFX color match: {bid} failed: {exc}")
+                            continue
+                    if cm_node is not None:
+                        cm_node.name = "VFX_COLORMATCH"
+                if cm_node is not None:
+                    cm_node.label = "COLOR MATCH"
+                    cm_node.node_tree = cm_ng
+                    cm_node.location = (2400, 0)
+                    cm_in_img = cm_node.inputs.get("Image")
+                    cm_in_str = cm_node.inputs.get("Strength")
+                    cm_out = cm_node.outputs.get("Image")
+                    print(f"VFX color match: img_in={cm_in_img} str_in={cm_in_str} out={cm_out}")
+                    if cm_in_img is not None and cm_out is not None:
+                        for l in list(cm_in_img.links):
+                            nt.links.remove(l)
+                        nt.links.new(current, cm_in_img)
+                        if cm_in_str is not None:
+                            cm_in_str.default_value = vfx.color_match_strength
+                        current = cm_out
+                        print("VFX color match: CONNECTED OK")
+                    else:
+                        print("VFX color match: FAILED to find sockets!")
+                else:
+                    print("VFX color match: FAILED to create node!")
+            else:
+                print("VFX color match: FAILED to get/create node group!")
+        except Exception as e:
+            import traceback
+            print("VFX color match error:", e)
+            traceback.print_exc()
 
     comp = None
     for node in nt.nodes:
