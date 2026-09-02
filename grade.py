@@ -1,8 +1,8 @@
-"""VFX Layer Tools — Two-level color grading system.
+"""VFX Layer Tools — Two-level color grading system (alpha-safe).
 
-Architecture fix: each grade node instance stores values in its own
-INPUT SOCKETS. The internal chain reads from GroupInput. Per-layer
-and master are fully independent — changing one never affects the other.
+Each grade node instance stores values in its own INPUT SOCKETS.
+The internal chain reads from GroupInput. Per-layer and master are independent.
+Alpha-safe: preserves original alpha, only grades RGB.
 """
 
 import bpy
@@ -44,14 +44,18 @@ def _new_node(ng, *ids):
 
 
 # ---------------------------------------------------------------------
-# VFX_Grade node group
+# VFX_Grade node group (alpha-safe)
 # ---------------------------------------------------------------------
 
 def build_vfx_grade_group():
     """Create or get the VFX_Grade node group.
 
     Internal chain (all values read from exposed GroupInput sockets):
-      Image → CB1(Exp via gain) → CB2(WB via gain) → CB3(LGG) → HueSat → BrightContrast → Image
+      Image ─┬─ SeparateColor(orig) → Alpha ──────────────────────┐
+             │                                                     │
+             └─ CB1(Exp) → CB2(WB) → CB3(LGG) → HS → CT          │
+                          graded_image → SeparateColor(graded)     │
+                          R,G,B ──────────────────────────────→ CombineColor → Output
     """
     ng = bpy.data.node_groups.get("VFX_Grade")
     if ng:
@@ -99,6 +103,12 @@ def build_vfx_grade_group():
     gout = ng.nodes.new("NodeGroupOutput")
     gout.location = (1000, 0)
 
+    # --- SeparateColor: original alpha (branch 1) ---
+    sep_orig = _new_node(ng, "ShaderNodeSeparateColor", "CompositorNodeSeparateColor")
+    if sep_orig:
+        sep_orig.name = "VFX_SEP_ORIG"
+        sep_orig.location = (-900, -300)
+
     # --- ColorBalance nodes ---
     cb1 = _new_node(ng, "CompositorNodeColorBalance")
     if cb1:
@@ -106,16 +116,16 @@ def build_vfx_grade_group():
 
     cb2 = _new_node(ng, "CompositorNodeColorBalance")
     if cb2:
-        cb2.name = "VFX_CB_WB"; cb2.label = "White Balance"; cb2.location = (100, 200)
+        cb2.name = "VFX_CB_WB"; cb2.label = "WB"; cb2.location = (100, 200)
 
     cb3 = _new_node(ng, "CompositorNodeColorBalance")
     if cb3:
-        cb3.name = "VFX_CB_LGG"; cb3.label = "Lift/Gamma/Gain"; cb3.location = (400, 200)
+        cb3.name = "VFX_CB_LGG"; cb3.label = "LGG"; cb3.location = (400, 200)
 
     # --- HueSat + BrightContrast ---
     hs = _new_node(ng, "CompositorNodeHueSat")
     if hs:
-        hs.name = "VFX_HS"; hs.label = "Saturation"; hs.location = (600, 200)
+        hs.name = "VFX_HS"; hs.label = "Sat"; hs.location = (600, 200)
 
     ct = _new_node(ng, "CompositorNodeBrightContrast")
     if ct:
@@ -125,7 +135,7 @@ def build_vfx_grade_group():
     mp = _new_node(ng, "CompositorNodeMath")
     if mp:
         mp.name = "VFX_POW"; mp.operation = 'POWER'; mp.location = (-600, 400)
-        mp.inputs[0].default_value = 2.0  # base
+        mp.inputs[0].default_value = 2.0
 
     # CombineColor: (EV, EV, EV) → color for CB1 gain
     ce = _new_node(ng, "CompositorNodeCombineColor", "ShaderNodeCombineColor")
@@ -133,7 +143,6 @@ def build_vfx_grade_group():
         ce.name = "VFX_COMB_EXP"; ce.location = (-400, 400)
 
     # --- Math for White Balance ---
-    # temp_r = 1 + temp, temp_b = 1 - temp, tint_g = 1 + tint
     ma_r = _new_node(ng, "CompositorNodeMath")
     if ma_r:
         ma_r.name = "VFX_ADD_R"; ma_r.operation = 'ADD'; ma_r.location = (-600, 100)
@@ -154,18 +163,54 @@ def build_vfx_grade_group():
     if cw:
         cw.name = "VFX_COMB_WB"; cw.location = (-400, 0)
 
+    # --- SeparateColor: graded RGB (branch 2) ---
+    sep_grad = _new_node(ng, "ShaderNodeSeparateColor", "CompositorNodeSeparateColor")
+    if sep_grad:
+        sep_grad.name = "VFX_SEP_GRADED"
+        sep_grad.location = (600, -300)
+
+    # --- CombineColor: graded RGB + original alpha → output ---
+    comb_out = _new_node(ng, "ShaderNodeCombineColor", "CompositorNodeCombineColor")
+    if comb_out:
+        comb_out.name = "VFX_COMB_OUT"
+        comb_out.location = (800, -300)
+
     # ======== LINKS ========
 
-    # Image chain: gin → CB1 → CB2 → CB3 → HS → CT → gout
-    cur = _find_sock(gin, "Image", 'output')
+    img_in = _find_sock(gin, "Image", 'output')
+    img_out = _find_sock(gout, "Image", 'input')
+
+    # Branch 1: Original image → SeparateColor_orig → orig_A
+    if img_in and sep_orig:
+        _link(ng, img_in, sep_orig.inputs[0])
+
+    # Branch 2: Image → Grade chain → graded_image
+    cur = img_in
     for node in (cb1, cb2, cb3, hs, ct):
         if node:
             inp = _find_sock(node, "Image", 'input')
             if inp:
                 _link(ng, cur, inp)
             cur = _find_sock(node, "Image", 'output') or cur
-    if cur:
-        _link(ng, cur, _find_sock(gout, "Image", 'input'))
+
+    # graded_image → SeparateColor_graded → R, G, B
+    if cur and sep_grad:
+        _link(ng, cur, sep_grad.inputs[0])
+
+    # CombineColor(graded_R, graded_G, graded_B, orig_A) → GroupOutput
+    if sep_grad and comb_out:
+        _link(ng, sep_grad.outputs[0], comb_out.inputs[0])  # R
+        _link(ng, sep_grad.outputs[1], comb_out.inputs[1])  # G
+        _link(ng, sep_grad.outputs[2], comb_out.inputs[2])  # B
+    if sep_orig and comb_out and len(sep_orig.outputs) > 3:
+        _link(ng, sep_orig.outputs[3], comb_out.inputs[3])  # A
+
+    if comb_out and img_out:
+        _link(ng, comb_out.outputs[0], img_out)
+
+    # Fallback: if alpha-safe nodes missing, connect directly
+    if (not sep_grad or not comb_out) and cur and img_out:
+        _link(ng, cur, img_out)
 
     # Exposure: gin.Exposure → POW(2,exp) → CombineColor → CB1.Gain
     _link(ng, _find_sock(gin, "Exposure", 'output'),
@@ -180,7 +225,7 @@ def build_vfx_grade_group():
         if g:
             _link(ng, ce.outputs[0], g)
 
-    # White Balance: gin.Temp → ADD_R, gin.Tint → ADD_G, 1-Temp → SUB_B → CombineColor → CB2.Gain
+    # White Balance: gin.Temp → ADD_R, gin.Tint → ADD_G, 1-Temp → SUB_B → COMB_WB → CB2.Gain
     _link(ng, _find_sock(gin, "Temperature", 'output'),
           ma_r.inputs[0] if ma_r else None)
     _link(ng, _find_sock(gin, "Temperature", 'output'),
@@ -260,7 +305,6 @@ def apply_grade_values(grade_node, source, prefix='l_'):
 # ---------------------------------------------------------------------
 
 def _create_grade_node(nt, name, label, location):
-    """Create or reuse a grade node in the comp tree."""
     ng = build_vfx_grade_group()
     if not ng:
         return None
@@ -285,10 +329,7 @@ def _create_grade_node(nt, name, label, location):
 
 
 def ensure_layer_grades(vfx, master, nt):
-    """Create per-layer grade nodes. Returns dict {layer_id: grade_node}.
-
-    Each node reads its own l_* properties into input sockets.
-    """
+    """Create per-layer grade nodes. Returns dict {layer_id: grade_node}."""
     grades = {}
     x = 200
     for layer in vfx.layers:
@@ -305,7 +346,7 @@ def ensure_layer_grades(vfx, master, nt):
         )
         if gn:
             apply_grade_values(gn, layer, 'l_')
-            # Connect source image → grade
+            # Connect source image → grade input
             src = nt.nodes.get(f"VFX_RL_{layer.id}")
             if src:
                 so = src.outputs.get("Image")
@@ -321,10 +362,7 @@ def ensure_layer_grades(vfx, master, nt):
 
 
 def ensure_master_grade(vfx, master, nt):
-    """Create master grade node. Returns node or None.
-
-    Reads m_* properties into input sockets.
-    """
+    """Create master grade node. Returns node or None."""
     if not getattr(vfx, 'm_grade_enable', False):
         existing = nt.nodes.get("VFX_GRADE_MASTER")
         if existing:

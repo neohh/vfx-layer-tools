@@ -824,18 +824,19 @@ def build_comp_assembly(vfx, master, nt=None):
                 for entry in meta:
                     lid = entry["id"]
                     lay = entry["layer"]
+                    # Always get source node for Alpha and other sockets
+                    ln = nt.nodes.get(f"VFX_RL_{lid}")
                     # Use grade output if available, otherwise raw source
                     grade_n = grade_nodes.get(lid)
                     if grade_n is not None:
                         src_sock = grade_n.outputs.get("Image")
                     else:
-                        ln = nt.nodes.get(f"VFX_RL_{lid}")
                         src_sock = ln.outputs.get("Image") if ln else None
                     s = gi(f"OBJ_{lid}")
                     if s is not None and src_sock is not None:
                         relink(s, src_sock)
                     s = gi(f"AL_{lid}")
-                    if s is not None and ln.outputs.get("Alpha"):
+                    if s is not None and ln is not None and ln.outputs.get("Alpha"):
                         relink(s, ln.outputs["Alpha"])
                     s = gi(f"F_{lid}")
                     if s is not None:
