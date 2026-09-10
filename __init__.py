@@ -744,7 +744,7 @@ CLASS_NAMES = tuple(cls.__name__ for cls in classes)
 # AUTO-RELOAD (dev convenience)
 # ---------------------------------------------------------------------
 
-_AUTO_RELOAD_ENABLED = True
+_AUTO_RELOAD_ENABLED = False  # breaks RNA state on edit; was removed in v2.3.0 for this reason
 _AUTO_RELOAD_INTERVAL = 2  # seconds
 _FILE_TIMESTAMPS = {}
 _AUTO_RELOAD_FIRST_RUN = True
@@ -827,11 +827,10 @@ def register():
     unregister()
 
     for cls in classes:
-        if not hasattr(bpy.types, cls.__name__):
-            try:
-                bpy.utils.register_class(cls)
-            except Exception as exc:
-                print(f"VFX register ERROR {cls.__name__}: {exc}")
+        try:
+            bpy.utils.register_class(cls)
+        except Exception as exc:
+            print(f"VFX register ERROR {cls.__name__}: {exc}")
 
     bpy.types.Scene.vfx = PointerProperty(type=VFXProject)
     print("VFX: Scene.vfx created")
