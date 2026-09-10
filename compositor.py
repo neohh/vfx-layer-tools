@@ -561,18 +561,26 @@ def build_mask(nt, props, name_prefix, source, invert, soft,
         if ext is not None and ext.outputs:
             sock = ext.outputs[0]
     elif source == 'ALPHA' and image_sock is not None:
-        sep = nt.nodes.get(f"MASK_{name_prefix}_ASEP")
-        if sep is None:
-            sep = _new_node(nt, "ShaderNodeSeparateColor", "CompositorNodeSeparateColor")
+        # Real alpha channel of the source (render layer / image nodes have it)
+        src_node = getattr(image_sock, "node", None)
+        if src_node is not None:
+            alpha = src_node.outputs.get("Alpha")
+            if alpha is not None:
+                sock = alpha
+        if sock is None:
+            # Fallback: Separate Color -> alpha channel (index 3)
+            sep = nt.nodes.get(f"MASK_{name_prefix}_ASEP")
+            if sep is None:
+                sep = _new_node(nt, "ShaderNodeSeparateColor", "CompositorNodeSeparateColor")
+                if sep is not None:
+                    sep.name = f"MASK_{name_prefix}_ASEP"
+                    sep.label = f"MASK {name_prefix} alpha"
             if sep is not None:
-                sep.name = f"MASK_{name_prefix}_ASEP"
-                sep.label = f"MASK {name_prefix} alpha"
-        if sep is not None:
-            sep.location = (-2600, -400)
-            for l in list(sep.inputs[0].links):
-                nt.links.remove(l)
-            nt.links.new(image_sock, sep.inputs[0])
-            sock = sep.outputs[0]
+                sep.location = (-2600, -400)
+                for l in list(sep.inputs[0].links):
+                    nt.links.remove(l)
+                nt.links.new(image_sock, sep.inputs[0])
+                sock = sep.outputs.get("Alpha") or sep.outputs[2]
     elif source == 'DEPTH':
         ds = depth_sock
         if ds is None:

@@ -510,9 +510,16 @@ class VFX_OT_pick_cryptomatte(bpy.types.Operator):
             if layer is not None:
                 layer.grade_mask_source = 'EXT'
                 layer.grade_mask_ext_node = "VFX_CRYPTO_PICK"
+        else:
+            # Master grade: enable it and point its Ext mask at the crypto node
+            if not vfx.m_grade_enable:
+                vfx.m_grade_enable = True
+            if vfx.grade_mask_source in {'NONE', 'EXT'}:
+                vfx.grade_mask_source = 'EXT'
+                vfx.grade_mask_ext_node = "VFX_CRYPTO_PICK"
         from .compositor import ensure_crypto_mask_node
         ensure_crypto_mask_node(vfx, master, name)
-        from .compositor import _trigger_comp as _tc
+        from .materials import _trigger_comp as _tc
         try:
             _tc(context)
         except Exception:
