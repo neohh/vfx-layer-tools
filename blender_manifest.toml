@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "vfx_layer_tools"
-version = "2.4.0"
+version = "2.5.0"
 name = "VFX Layer Tools"
 tagline = "VFX layer / scene / compositing manager"
 maintainer = "VFX Pipeline"
@@ -9,7 +9,7 @@ type = "add-on"
 tags = ["Compositing", "Render"]
 license = ["SPDX:MIT"]
 
-blender_version_min = "5.1.0"
+blender_version_min = "5.2.1"
 
 [permissions]
 files = "Render EXR sequences and manage compositing output files"

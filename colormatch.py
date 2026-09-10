@@ -1,4 +1,4 @@
-"""VFX Layer Tools — Color correction / plate matching."""
+"""VFX Layer Tools — Color correction / plate matching (Blender 5.2 safe)."""
 
 import bpy
 
@@ -51,119 +51,141 @@ PRESETS = {
 }
 
 
+def _new(ng, *ids):
+    for i in ids:
+        try:
+            return ng.nodes.new(i)
+        except Exception:
+            continue
+    return None
+
+
+def _rgba_in(node):
+    for s in node.inputs:
+        if s.type == 'RGBA':
+            return s
+    return None
+
+
+def _rgba_out(node):
+    for s in node.outputs:
+        if s.type == 'RGBA':
+            return s
+    return None
+
+
+def _mix_node(ng, name, loc, blend='MIX'):
+    """Create/reuse a Mix node that works on both legacy and modern Blender."""
+    mix = ng.nodes.get(name)
+    if mix is None:
+        mix = _new(ng, "CompositorNodeMixRGB", "ShaderNodeMix")
+        if mix is None:
+            return None, None, None, None, None
+        mix.name = name
+    mix.location = loc
+    if mix.bl_idname == 'ShaderNodeMix':
+        try:
+            mix.data_type = 'RGBA'
+        except Exception:
+            pass
+    try:
+        mix.blend_type = blend
+    except Exception:
+        pass
+    if mix.bl_idname == 'ShaderNodeMix':
+        fac = a = b = out = None
+        for s in mix.inputs:
+            if fac is None and s.type == 'VALUE' and s.name == 'Factor':
+                fac = s
+            if s.type == 'RGBA' and s.name == 'A':
+                a = s
+            if s.type == 'RGBA' and s.name == 'B':
+                b = s
+        for s in mix.outputs:
+            if s.type == 'RGBA' and out is None:
+                out = s
+        if a is not None and b is not None:
+            return mix, fac, a, b, out
+    return (mix, mix.inputs.get("Fac"), mix.inputs.get("Color1"),
+            mix.inputs.get("Color2"), _rgba_out(mix))
+
+
 def get_or_create_color_match_group():
-    """Get or create the VFX_ColorMatch node group."""
+    """Get or rebuild the VFX_ColorMatch node group (5.2-safe)."""
     ng = bpy.data.node_groups.get("VFX_ColorMatch")
-    if ng is not None:
-        return ng
-
-    ng = bpy.data.node_groups.new("VFX_ColorMatch", 'CompositorNodeTree')
-
-    # Interface sockets
+    if ng is None:
+        ng = bpy.data.node_groups.new("VFX_ColorMatch", 'CompositorNodeTree')
+    ng.nodes.clear()
+    try:
+        ng.interface.items_clear()
+    except Exception:
+        try:
+            ng.interface.clear()
+        except Exception:
+            pass
     ng.interface.new_socket("Image", in_out='INPUT', socket_type='NodeSocketColor')
     ng.interface.new_socket("Strength", in_out='INPUT', socket_type='NodeSocketFloat')
     ng.interface.new_socket("Image", in_out='OUTPUT', socket_type='NodeSocketColor')
-
-    # Set default for Strength
     for item in ng.interface.items_tree:
         if item.name == "Strength" and item.in_out == 'INPUT':
-            item.default_value = 1.0
+            try:
+                item.default_value = 1.0
+            except Exception:
+                pass
 
     gin = ng.nodes.new("NodeGroupInput")
     gin.location = (-600, 0)
     gout = ng.nodes.new("NodeGroupOutput")
-    gout.location = (400, 0)
-
-    # Color Balance (Lift/Gamma/Gain)
-    cb = ng.nodes.new("CompositorNodeColorBalance")
-    cb.name = "VFX_CB"
-    cb.label = "Color Balance"
-    cb.location = (-200, 0)
-    cb.correction_method = 'LIFT_GAMMA_GAIN'
-
-    # Hue/Saturation
-    hs = ng.nodes.new("CompositorNodeHueSat")
-    hs.name = "VFX_HS"
-    hs.label = "Hue/Sat"
-    hs.location = (100, 0)
-
-    # Mix Strength: blend between original and corrected
-    mix = ng.nodes.new("CompositorNodeMixRGB")
-    mix.name = "VFX_STRENGTH_MIX"
-    mix.label = "Strength"
-    mix.location = (250, 0)
-    try:
-        mix.blend_type = 'MIX'
-    except Exception:
-        pass
-
-    # Links: Image → ColorBalance → HueSat → Mix(B) → Output
+    gout.location = (450, 0)
     img_in = gin.outputs.get("Image")
     str_in = gin.outputs.get("Strength")
     img_out = gout.inputs.get("Image")
 
-    # Image → CB
-    cb_img = None
-    for s in cb.inputs:
-        if s.type == 'RGBA':
-            cb_img = s
-            break
-    if cb_img and img_in:
-        ng.links.new(img_in, cb_img)
+    cur = img_in
 
-    # CB → HS
-    cb_out = None
-    for s in cb.outputs:
-        if s.type == 'RGBA':
-            cb_out = s
-            break
-    hs_img = None
-    for s in hs.inputs:
-        if s.type == 'RGBA':
-            hs_img = s
-            break
-    if cb_out and hs_img:
-        ng.links.new(cb_out, hs_img)
+    # Stage 1: Color Balance (Lift/Gamma/Gain)
+    cb = _new(ng, "CompositorNodeColorBalance")
+    if cb is not None:
+        cb.name = "VFX_CB"
+        cb.label = "Color Balance"
+        cb.location = (-350, 0)
+        try:
+            cb.correction_method = 'LIFT_GAMMA_GAIN'
+        except Exception:
+            pass
+        i = _rgba_in(cb)
+        if i is not None and cur is not None:
+            ng.links.new(cur, i)
+            o = _rgba_out(cb)
+            if o is not None:
+                cur = o
 
-    # HS → Mix(B)
-    hs_out = None
-    for s in hs.outputs:
-        if s.type == 'RGBA':
-            hs_out = s
-            break
-    mix_b = None
-    mix_fac = None
-    for s in mix.inputs:
-        if s.type == 'RGBA' and s.name != 'Color1':
-            if mix_b is None:
-                mix_b = s
-        if s.type == 'VALUE' and mix_fac is None:
-            mix_fac = s
-    if hs_out and mix_b:
-        ng.links.new(hs_out, mix_b)
+    # Stage 2: Hue / Saturation
+    hs = _new(ng, "CompositorNodeHueSat", "ShaderNodeHueSaturation")
+    if hs is not None:
+        hs.name = "VFX_HS"
+        hs.label = "Hue / Sat"
+        hs.location = (-100, 0)
+        i = _rgba_in(hs)
+        if i is not None and cur is not None:
+            ng.links.new(cur, i)
+            o = _rgba_out(hs)
+            if o is not None:
+                cur = o
 
-    # Original → Mix(A)
-    mix_a = None
-    for s in mix.inputs:
-        if s.type == 'RGBA' and s.name == 'Color1':
-            mix_a = s
-            break
-    if mix_a and img_in:
-        ng.links.new(img_in, mix_a)
+    # Stage 3: Strength mix (original <-> corrected)
+    mix, fac, a, b, out = _mix_node(ng, "VFX_STRENGTH_MIX", (200, 0))
+    if mix is not None and a is not None and b is not None and out is not None:
+        if cur is not None:
+            ng.links.new(cur, b)
+        if img_in is not None:
+            ng.links.new(img_in, a)
+        if fac is not None and str_in is not None:
+            ng.links.new(str_in, fac)
+        cur = out
 
-    # Strength → Mix Fac
-    if mix_fac and str_in:
-        ng.links.new(str_in, mix_fac)
-
-    # Mix → Output
-    mix_out = None
-    for s in mix.outputs:
-        if s.type == 'RGBA':
-            mix_out = s
-            break
-    if mix_out and img_out:
-        ng.links.new(mix_out, img_out)
-
+    if cur is not None and img_out is not None:
+        ng.links.new(cur, img_out)
     return ng
 
 
@@ -174,26 +196,17 @@ def apply_preset(ng, preset_name, strength=1.0):
         return
 
     cb = ng.nodes.get("VFX_CB")
-    if cb is None:
-        return
+    if cb is not None:
+        for attr in ("lift", "gamma", "gain"):
+            val = preset[attr]
+            try:
+                setattr(cb, attr, val)
+            except Exception:
+                try:
+                    setattr(cb, attr, tuple(list(val) + [1.0]))
+                except Exception:
+                    pass
 
-    # Set Color Balance
-    try:
-        cb.lift = preset['lift']
-    except Exception:
-        pass
-    try:
-        cb.gamma = preset['gamma']
-    except Exception:
-        cb.gamma = tuple(list(preset['gamma']) + [1.0])
-    except Exception:
-        pass
-    try:
-        cb.gain = preset['gain']
-    except Exception:
-        pass
-
-    # Set Hue/Saturation
     hs = ng.nodes.get("VFX_HS")
     if hs is not None:
         for s in hs.inputs:
@@ -208,7 +221,6 @@ def apply_preset(ng, preset_name, strength=1.0):
                 except Exception:
                     pass
 
-    # Set Strength mix
     mix = ng.nodes.get("VFX_STRENGTH_MIX")
     if mix is not None:
         for s in mix.inputs:

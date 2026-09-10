@@ -1,6 +1,7 @@
 """VFX Layer Tools — operators."""
 
 import bpy
+import math
 import time
 from bpy.props import (
     StringProperty, BoolProperty, IntProperty, FloatProperty, EnumProperty,
@@ -405,6 +406,117 @@ class VFX_OT_toggle_fog_expand(bpy.types.Operator):
         vfx, master = get_project(context)
         vfx.fog_expanded = not vfx.fog_expanded
         return {'FINISHED'}
+
+
+class VFX_OT_preview_this_mask(bpy.types.Operator):
+    bl_idname = "vfx.preview_this_mask"
+    bl_label = "Show This Mask"
+    bl_description = "Show this effect's mask in the viewer"
+    bl_options = {'REGISTER', 'UNDO'}
+    source: EnumProperty(
+        name="Mask Source",
+        items=(('FOG', "Fog", ""), ('DOF', "DOF", ""), ('GLARE', "Glare", ""), ('GRADE', "Grade", "")),
+    )
+    def execute(self, context):
+        vfx, master = get_project(context)
+        vfx.mask_source = self.source
+        vfx.use_mask = True
+        return {'FINISHED'}
+
+
+class VFX_OT_pick_cryptomatte(bpy.types.Operator):
+    """Pick an object in the 3D view; its name becomes an EXT mask source"""
+    bl_idname = "vfx.pick_cryptomatte"
+    bl_label = "Pick Object (pipette)"
+    bl_description = "Click an object in the 3D view to use it as mask"
+    bl_options = {'REGISTER'}
+
+    target: EnumProperty(
+        name="Target",
+        items=(('NONE', "Global", "Store in scene VFX crypto_pick_name"),
+               ('LAYER', "Active Layer", "Store in the active layer's grade Ext Node")),
+        default='NONE')
+
+    def invoke(self, context, event):
+        if context.area and context.area.type != 'VIEW_3D':
+            self.report({'ERROR'}, "Run from the 3D Viewport")
+            return {'CANCELLED'}
+        context.window_manager.modal_handler_add(self)
+        context.workspace.status_text_set(
+            "VFX pipette: LMB pick object | ESC/RMB cancel")
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        context.area.tag_redraw()
+        if event.type in {'ESC', 'RIGHTMOUSE'}:
+            context.workspace.status_text_set(None)
+            return {'CANCELLED'}
+        if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+            obj = self._pick(context, event)
+            context.workspace.status_text_set(None)
+            if obj is None:
+                self.report({'WARNING'}, "Nothing under the cursor")
+                return {'CANCELLED'}
+            self._apply(context, obj.name)
+            self.report({'INFO'}, f"Mask object: {obj.name}")
+            return {'FINISHED'}
+        if event.type == 'MOUSEMOVE':
+            return {'RUNNING_MODAL'}
+        return {'PASS_THROUGH'}
+
+    def _pick(self, context, event):
+        """Project all visible objects to screen space, nearest wins.
+        (scene.ray_cast is unreliable in Blender 5.2 — per AGENT.md)"""
+        import mathutils
+        region = context.region
+        rv3d = context.region_data
+        if region is None or rv3d is None:
+            return None
+        mx, my = event.mouse_region_x, event.mouse_region_y
+        best, best_d = None, 48.0  # px radius around the click
+        dg = context.evaluated_depsgraph_get()
+        for obj in context.visible_objects:
+            if obj.type not in {'MESH', 'CURVE', 'SURFACE', 'META', 'FONT'}:
+                continue
+            try:
+                ev = obj.evaluated_get(dg)
+                # proper perspective projection of the bounding box
+                prj = rv3d.perspective_matrix @ ev.matrix_world.to_4x4()
+                corners = [prj @ mathutils.Vector(c[:] + (1.0,)) for c in ev.bound_box]
+                vis = False
+                for c in corners:
+                    if c.w > 0:
+                        vis = True
+                        break
+                if not vis:
+                    continue
+                ndc_x = sum(c.x / c.w for c in corners) / len(corners)
+                ndc_y = sum(c.y / c.w for c in corners) / len(corners)
+                sx = region.width * (ndc_x * 0.5 + 0.5)
+                sy = region.height * (ndc_y * 0.5 + 0.5)
+                d = math.hypot(sx - mx, sy - my)
+                if d < best_d:
+                    best_d = d
+                    best = obj
+            except Exception:
+                continue
+        return best
+
+    def _apply(self, context, name):
+        vfx, master = get_project(context, allow_write=True)
+        vfx.crypto_pick_name = name
+        if self.target == 'LAYER':
+            layer = active_layer(vfx)
+            if layer is not None:
+                layer.grade_mask_source = 'EXT'
+                layer.grade_mask_ext_node = "VFX_CRYPTO_PICK"
+        from .compositor import ensure_crypto_mask_node
+        ensure_crypto_mask_node(vfx, master, name)
+        from .compositor import _trigger_comp as _tc
+        try:
+            _tc(context)
+        except Exception:
+            pass
 
 
 class VFX_OT_drag_layer(bpy.types.Operator):

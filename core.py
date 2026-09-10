@@ -234,14 +234,7 @@ def sync_scene_settings(master, scene):
             vl.use_pass_normal = True
         except Exception:
             pass
-        try:
-            vl.use_pass_cryptomatte_object = True
-        except Exception:
-            pass
-        try:
-            vl.use_pass_cryptomatte_material = True
-        except Exception:
-            pass
+
     sync_engine_settings(master, scene)
 
 

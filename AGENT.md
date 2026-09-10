@@ -1,5 +1,9 @@
 # AGENT.md — VFX Layer Tools: полная информация
 
+## Язык общения
+
+**Всегда отвечать на русском языке**, независимо от языка запроса пользователя.
+
 ## Репозиторий
 
 - **URL:** https://github.com/neohh/vfx-layer-tools
@@ -29,20 +33,28 @@ https://github.com/neohh/vfx-layer-tools/
 └── .gitignore
 ```
 
-**Установка в Blender (на компе пользователя):**
+**Подключение к Blender (через Script Directories):**
 ```
-C:\Users\maxim\AppData\Roaming\Blender Foundation\Blender\5.2\scripts\addons\vfx_layer_tools\
-├── __init__.py
-├── core.py
-├── shadow.py
-├── compositor.py
-├── materials.py
-├── operators.py
-├── diagnostic.py
-└── ui.py
+C:\Файлы\Work\Scripts and Addons\          ← указана в Preferences → File Paths → Script Directories
+├── vfx_layer_tools\                        ← РЕАЛЬНАЯ папка аддона (здесь работаем, здесь git)
+│   ├── __init__.py
+│   ├── core.py
+│   ├── shadow.py
+│   ├── compositor.py
+│   ├── materials.py
+│   ├── operators.py
+│   ├── diagnostic.py
+│   └── ui.py
+└── addons\                                 ← Blender сканирует только <script dir>\addons\
+    └── vfx_layer_tools  ═JUNCTION═►  ..\..\vfx_layer_tools
 ```
 
-**ВАЖНО:** Рабочая директория Agents — это установочная папка аддона в Blender. git-репозиторий инициализирован ВНУТРИ этой папки, но `.git` ссылается на `https://github.com/neohh/vfx-layer-tools.git`.
+- Физический путь: `C:\Файлы\Work\Scripts and Addons\vfx_layer_tools` (в bash/агентах также виден как `/c/DC86~1/Work/Scripts and Addons/vfx_layer_tools`; `C:\Файлы` — сетевая папка `\Maxpc\Файлы`, замапленная на `Z:` → `Z:\Work\Scripts and Addons\vfx_layer_tools`).
+- В `addons\` лежит NTFS-junction, ведущий на реальную папку — файлы в одном экземпляре. Junction делается так: `powershell -NoProfile -Command 'New-Item -ItemType Junction -Path "...\addons\vfx_layer_tools" -Target "...\vfx_layer_tools"'` (обычный `cmd mklink /J` в этом окружении не работает).
+- Blender сканирует только `<script dir>\addons\`, поэтому папка `addons` обязательна. После изменения Script Directories нужен перезапуск Blender.
+- После правки кода аддон перезагружается сам (auto-reload таймер) либо через F3 → «Reload Scripts».
+
+**ВАЖНО:** Рабочая директория Agents — реальная папка аддона (см. выше). git-репозиторий инициализирован ВНУТРИ этой папки, `.git` ссылается на `https://github.com/neohh/vfx-layer-tools.git`.
 
 ## Git workflow
 
@@ -106,7 +118,7 @@ gh release upload vX.Y.Z vfx_layer_tools_vX.Y.Z.zip --clobber
 |------|-----------|
 | `__init__.py` | bl_info, Properties (VFXProject, VFXLayer), register/unregister, auto-reload |
 | `core.py` | Утилиты: ensure_root, ensure_camera_collection, create_empty_scene, sync_scene_settings |
-| `compositor.py` | Композитор: build_comp_assembly, rebuild_comp_from_files, fog system, blur, DOF, glare, auto_calibrate_mist |
+| `compositor.py` | Композитор: build_comp_assembly, rebuild_comp_from_files, fog system, DOF (ColorRamp), glare, master grade, система масок build_mask, самопроверка |
 | `operators.py` | Все операторы: render, rebuild comp, shadow pass, diagnostics, auto-calibrate |
 | `materials.py` | _trigger_comp, _trigger_rebuild, material editing (adjust viewport materials) |
 | `shadow.py` | Shadow catcher, proxy objects |

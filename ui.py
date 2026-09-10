@@ -79,6 +79,31 @@ def _draw_layer_list(context, layout):
             box.prop(layer, "shadow_strength")
         if vfx.use_fog:
             box.prop(layer, "fog_factor")
+        box.prop(layer, "use_grade")
+        if layer.use_grade:
+            lg = box.column(align=True)
+            lg.prop(layer, "grade_bright")
+            lg.prop(layer, "grade_contrast")
+            lg.prop(layer, "grade_sat")
+            row = lg.row(align=True)
+            row.prop(layer, "use_alpha_mask", icon='MOD_MASK')
+            if not layer.use_alpha_mask:
+                lg.prop(layer, "grade_mask_source", text="Mask")
+                if layer.grade_mask_source == 'DEPTH':
+                    lr = lg.row(align=True)
+                    lr.prop(layer, "grade_mask_depth_start")
+                    lr.prop(layer, "grade_mask_depth_end")
+                elif layer.grade_mask_source == 'LUMA':
+                    lr = lg.row(align=True)
+                    lr.prop(layer, "grade_mask_luma_lo")
+                    lr.prop(layer, "grade_mask_luma_hi")
+                elif layer.grade_mask_source == 'EXT':
+                    lg.prop(layer, "grade_mask_ext_node")
+                    pk = lg.operator("vfx.pick_cryptomatte", text="Pick Object (pipette)", icon='EYEDROPPER')
+                    pk.target = 'LAYER'
+                r3 = lg.row(align=True)
+                r3.prop(layer, "grade_mask_invert")
+                r3.prop(layer, "grade_mask_soft")
         box.separator()
         box.prop(layer, "use_adjust")
         if layer.use_adjust:
@@ -96,6 +121,42 @@ def _draw_layer_list(context, layout):
             if layer.tint_strength > 0.0:
                 adj.prop(layer, "tint_color", text="")
             adj.operator("vfx.reset_lighting", icon='LOOP_BACK')
+
+
+def _draw_mask_section(context, layout, vfx, prefix, sources):
+    """Unified MASK sub-section for a masked effect (props: <prefix>_mask_*)."""
+    src = getattr(vfx, prefix + "_mask_source", 'NONE')
+    box = layout.box()
+    hdr = box.row(align=True)
+    hdr.label(text="MASK", icon='MOD_MASK')
+    hdr.prop(vfx, prefix + "_mask_source", text="")
+    if src == 'NONE':
+        return
+    col = box.column(align=True)
+    col.prop(vfx, prefix + "_mask_invert")
+    col.prop(vfx, prefix + "_mask_soft")
+    if src == 'DEPTH':
+        cr = col.row(align=True)
+        cr.prop(vfx, prefix + "_mask_depth_start")
+        cr.prop(vfx, prefix + "_mask_depth_end")
+    elif src == 'LUMA':
+        lr = col.row(align=True)
+        lr.prop(vfx, prefix + "_mask_luma_lo")
+        lr.prop(vfx, prefix + "_mask_luma_hi")
+    elif src == 'EXT':
+        col.prop(vfx, prefix + "_mask_ext_node")
+        if prefix == 'grade' and src == 'EXT':
+            pk = col.row(align=True)
+            pk.operator("vfx.pick_cryptomatte", text="Pick Object (pipette)", icon='EYEDROPPER')
+            if getattr(vfx, "crypto_pick_name", ""):
+                pk.label(text=vfx.crypto_pick_name, icon='OBJECT_DATA')
+    pr = col.row(align=True)
+    pr.prop(vfx, "use_mask", text="Preview Mask", icon='HIDE_OFF', toggle=True)
+    if vfx.use_mask:
+        pr.prop(vfx, "mask_source", text="")
+        if vfx.mask_source != prefix.upper():
+            row2 = col.row(align=True)
+            row2.operator("vfx.preview_this_mask", text="Show This Mask").source = prefix.upper()
 
 
 def _draw_post_effects(context, layout):
@@ -118,25 +179,20 @@ def _draw_post_effects(context, layout):
         fb.prop(vfx, "fog_strength")
         if vfx.fog_strength > 0.0:
             fb.prop(vfx, "fog_color", text="")
-    blurbox = layout.box()
-    bbh = blurbox.row(align=True)
-    bbh.prop(vfx, "use_blur", text="")
-    bbh.label(text="ATMOSPHERIC BLUR", icon='FILTER')
-    if vfx.use_blur:
-        bc = blurbox.column(align=True)
-        bc.prop(vfx, "blur_size")
-        br = bc.row(align=True)
-        br.prop(vfx, "blur_ramp_black")
-        br.prop(vfx, "blur_ramp_white")
+        _draw_mask_section(context, fb, vfx, "fog", ('DEPTH', 'LUMA', 'EXT'))
     dofbox = layout.box()
     dh = dofbox.row(align=True)
     dh.prop(vfx, "use_dof", text="")
     dh.label(text="CAMERA FOCUS (DOF)", icon='CAMERA_DATA')
     if vfx.use_dof:
         dc = dofbox.column(align=True)
-        dc.prop(vfx, "dof_fstop")
         dc.prop(vfx, "dof_focus")
+        dr = dc.row(align=True)
+        dr.prop(vfx, "dof_far_start")
+        dr.prop(vfx, "dof_far_end")
         dc.prop(vfx, "dof_maxblur")
+        dc.label(text="Ramp: edit DOF FOCUS RAMP node in comp", icon='INFO')
+        _draw_mask_section(context, dc, vfx, "dof", ('ALPHA', 'DEPTH', 'LUMA', 'EXT'))
     glowbox = layout.box()
     gr = glowbox.row(align=True)
     gr.prop(vfx, "use_glare", text="")
@@ -147,6 +203,7 @@ def _draw_post_effects(context, layout):
         gc.prop(vfx, "glare_strength")
         gc.prop(vfx, "glare_threshold")
         gc.prop(vfx, "glare_size")
+        _draw_mask_section(context, gc, vfx, "glare", ('ALPHA', 'DEPTH', 'LUMA', 'EXT'))
     ldbox = layout.box()
     lbw = ldbox.row(align=True)
     lbw.prop(vfx, "use_lensdist", text="")
@@ -155,20 +212,21 @@ def _draw_post_effects(context, layout):
         lc = ldbox.column(align=True)
         lc.prop(vfx, "lensdist_distort")
         lc.prop(vfx, "lensdist_disperse")
+    gradebox = layout.box()
+    gw = gradebox.row(align=True)
+    gw.prop(vfx, "use_master_grade", text="")
+    gw.label(text="MASTER GRADE", icon='COLOR')
+    if vfx.use_master_grade:
+        gc2 = gradebox.column(align=True)
+        gc2.prop(vfx, "grade_brightness")
+        gc2.prop(vfx, "grade_contrast")
+        gc2.prop(vfx, "grade_saturation")
+        _draw_mask_section(context, gc2, vfx, "grade", ('ALPHA', 'DEPTH', 'LUMA', 'EXT'))
 
 
 def _draw_advanced_features(context, layout):
-    """Draw advanced features: Cryptomatte, Color Match, Light Groups."""
+    """Draw advanced features: Color Match, Light Groups."""
     vfx, master = get_project(context, allow_write=False)
-
-    # Cryptomatte
-    box = layout.box()
-    bh = box.row(align=True)
-    bh.prop(vfx, "use_cryptomatte", text="")
-    bh.label(text="CRYPTOMATTE", icon='RESTRICT_SELECT_OFF')
-    if vfx.use_cryptomatte:
-        box.label(text="Auto-enabled on all layer scenes", icon='INFO')
-        box.label(text="Use eyedropper in compositor to pick objects", icon='INFO')
 
     # Color Match
     box = layout.box()

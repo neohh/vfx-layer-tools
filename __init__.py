@@ -1,14 +1,14 @@
 bl_info = {
     "name": "VFX Layer Tools",
     "author": "VFX Pipeline",
-    "version": (2, 4, 0),
-    "blender": (5, 1, 0),
+    "version": (2, 5, 0),
+    "blender": (5, 2, 1),
     "location": "View3D > Sidebar > VFX",
     "description": "VFX layer / scene / compositing manager",
     "category": "Compositing",
 }
 
-VFX_VERSION = "2.4.0"
+VFX_VERSION = "2.5.0"
 
 import bpy
 import gc
@@ -68,11 +68,6 @@ def _fog_changed(ctx):
     _trigger_comp(ctx)
 
 
-def _blur_changed(ctx):
-    _auto_mask(ctx, 'BLUR')
-    _trigger_comp(ctx)
-
-
 def _dof_changed(ctx):
     _auto_mask(ctx, 'DOF')
     _trigger_comp(ctx)
@@ -101,6 +96,23 @@ def _engine_items_cycles_first(self, context):
         ids = ["CYCLES"] + ids
     ordered = ["CYCLES"] + [i for i in ids if i != "CYCLES"]
     return [(i, _engine_label(i), "") for i in ordered]
+
+
+# ---------------------------------------------------------------------
+# MASK SOURCE ITEMS (shared by all masked effects)
+# ---------------------------------------------------------------------
+
+_MASK_SOURCE_ITEMS = (
+    ('NONE', "None", "No mask: effect acts everywhere"),
+    ('EXT', "Ext (node)", "External mask from a named comp node"),
+    ('ALPHA', "Alpha", "Mask from the layer alpha (silhouette)"),
+    ('DEPTH', "Depth", "Mask by depth (start/end in meters)"),
+    ('LUMA', "Luma", "Mask by brightness (lo/hi)"),
+)
+
+
+def _mask_source_items(self, context):
+    return _MASK_SOURCE_ITEMS
 
 
 # ---------------------------------------------------------------------
@@ -163,6 +175,65 @@ class VFXLayer(bpy.types.PropertyGroup):
     fog_factor: FloatProperty(
         name="Fog x(layer)", default=1.0, min=0.0, max=2.0,
         description="Per-layer multiplier: 0 = off, 1 = normal, 2 = double",
+        update=lambda self, ctx: _trigger_comp(ctx)
+    )
+    use_grade: BoolProperty(
+        name="Grade (comp)",
+        description="Per-layer color grade in the compositor",
+        default=False,
+        update=lambda self, ctx: _trigger_comp(ctx)
+    )
+    grade_bright: FloatProperty(
+        name="Brightness", default=0.0, min=-1.0, max=1.0,
+        update=lambda self, ctx: _trigger_comp(ctx)
+    )
+    grade_contrast: FloatProperty(
+        name="Contrast", default=0.0, min=-1.0, max=1.0,
+        update=lambda self, ctx: _trigger_comp(ctx)
+    )
+    grade_sat: FloatProperty(
+        name="Saturation", default=1.0, min=0.0, max=2.0,
+        update=lambda self, ctx: _trigger_comp(ctx)
+    )
+    use_alpha_mask: BoolProperty(
+        name="Use Alpha Mask",
+        description="Restrict the grade to the layer silhouette",
+        default=True,
+        update=lambda self, ctx: _trigger_comp(ctx)
+    )
+    grade_mask_source: EnumProperty(
+        name="Grade Mask Source",
+        items=_mask_source_items,
+        default='NONE',
+        update=lambda self, ctx: _trigger_comp(ctx)
+    )
+    grade_mask_invert: BoolProperty(
+        name="Invert Mask", default=False,
+        update=lambda self, ctx: _trigger_comp(ctx)
+    )
+    grade_mask_soft: FloatProperty(
+        name="Softness (px)", default=0.0, min=0.0, max=50.0,
+        update=lambda self, ctx: _trigger_comp(ctx)
+    )
+    grade_mask_depth_start: FloatProperty(
+        name="Depth Start (m)", default=0.0, min=0.0, max=1000.0,
+        update=lambda self, ctx: _trigger_comp(ctx)
+    )
+    grade_mask_depth_end: FloatProperty(
+        name="Depth End (m)", default=50.0, min=0.1, max=1000.0,
+        update=lambda self, ctx: _trigger_comp(ctx)
+    )
+    grade_mask_luma_lo: FloatProperty(
+        name="Luma Lo", default=0.0, min=0.0, max=1.0,
+        update=lambda self, ctx: _trigger_comp(ctx)
+    )
+    grade_mask_luma_hi: FloatProperty(
+        name="Luma Hi", default=1.0, min=0.0, max=1.0,
+        update=lambda self, ctx: _trigger_comp(ctx)
+    )
+    grade_mask_ext_node: StringProperty(
+        name="Ext Node", default="",
+        description="Name of a node in comp whose output is used as mask",
         update=lambda self, ctx: _trigger_comp(ctx)
     )
     expanded: BoolProperty(
@@ -251,18 +322,59 @@ class VFXProject(bpy.types.PropertyGroup):
         name="Ramp White", default=1.0, min=0.0, max=1.0,
         update=lambda s, c: _trigger_comp(c)
     )
+    fog_mask_source: EnumProperty(
+        name="Fog Mask Source",
+        items=_mask_source_items,
+        default='NONE',
+        update=lambda s, c: _trigger_comp(c)
+    )
+    fog_mask_invert: BoolProperty(
+        name="Invert Mask", default=False,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    fog_mask_soft: FloatProperty(
+        name="Softness (px)", default=0.0, min=0.0, max=50.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    fog_mask_depth_start: FloatProperty(
+        name="Depth Start (m)", default=0.0, min=0.0, max=1000.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    fog_mask_depth_end: FloatProperty(
+        name="Depth End (m)", default=50.0, min=0.1, max=1000.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    fog_mask_luma_lo: FloatProperty(
+        name="Luma Lo", default=0.0, min=0.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    fog_mask_luma_hi: FloatProperty(
+        name="Luma Hi", default=1.0, min=0.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    fog_mask_ext_node: StringProperty(
+        name="Ext Node", default="",
+        description="Name of a node in comp whose output is used as mask",
+        update=lambda s, c: _trigger_comp(c)
+    )
     use_mask: BoolProperty(
         name="Show Mask",
         description="Show effect mask in viewer instead of final composite",
         default=False,
         update=lambda s, c: _trigger_comp(c)
     )
+    crypto_pick_name: StringProperty(
+        name="Picked Object",
+        description="Object picked with the Cryptomatte pipette",
+        default=""
+    )
     mask_source: EnumProperty(
         name="Mask Source",
         items=(
             ('FOG', "Fog Mask", "Show fog density mask"),
-            ('BLUR', "Blur Mask", "Show atmospheric blur mask"),
-            ('DOF', "Depth Mask", "Show depth / Z pass"),
+            ('DOF', "DOF Mask", "Show DOF blur mask"),
+            ('GLARE', "Glare Mask", "Show glare mask"),
+            ('GRADE', "Grade Mask", "Show master grade mask"),
         ),
         default='FOG',
         update=lambda s, c: _trigger_comp(c)
@@ -306,29 +418,56 @@ class VFXProject(bpy.types.PropertyGroup):
         name="Glare Size", default=0.5, min=0.0, max=1.0,
         update=lambda s, c: _trigger_comp(c)
     )
-    use_blur: BoolProperty(
-        name="Atmospheric Blur (mist)",
-        description="Far = more blur, artistic depth haze",
-        default=False,
+    glare_mask_source: EnumProperty(
+        name="Glare Mask Source",
+        items=_mask_source_items,
+        default='NONE',
         update=lambda s, c: _trigger_comp(c)
     )
-    blur_size: FloatProperty(
-        name="Blur Size (px)", default=8.0, min=0.0, max=100.0,
-        update=lambda s, c: _blur_changed(c)
-    )
-    blur_ramp_black: FloatProperty(
-        name="Blur Black", default=0.0, min=0.0, max=1.0,
+    glare_mask_invert: BoolProperty(
+        name="Invert Mask", default=False,
         update=lambda s, c: _trigger_comp(c)
     )
-    blur_ramp_white: FloatProperty(
-        name="Blur White", default=1.0, min=0.0, max=1.0,
+    glare_mask_soft: FloatProperty(
+        name="Softness (px)", default=0.0, min=0.0, max=50.0,
         update=lambda s, c: _trigger_comp(c)
+    )
+    glare_mask_depth_start: FloatProperty(
+        name="Depth Start (m)", default=0.0, min=0.0, max=1000.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    glare_mask_depth_end: FloatProperty(
+        name="Depth End (m)", default=50.0, min=0.1, max=1000.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    glare_mask_luma_lo: FloatProperty(
+        name="Luma Lo", default=0.0, min=0.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    glare_mask_luma_hi: FloatProperty(
+        name="Luma Hi", default=1.0, min=0.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    glare_mask_ext_node: StringProperty(
+        name="Ext Node", default="",
+        description="Name of a node in comp whose output is used as mask",
+        update=lambda s, c: _trigger_comp(c)
+    )
+    dof_far_start: FloatProperty(
+        name="Far Start (m)", default=2.0, min=0.1, max=500.0,
+        description="Distance beyond focus where blur begins to grow",
+        update=lambda s, c: _dof_changed(c)
+    )
+    dof_far_end: FloatProperty(
+        name="Far End (m)", default=20.0, min=0.2, max=500.0,
+        description="Distance beyond focus where blur reaches Max Blur",
+        update=lambda s, c: _dof_changed(c)
     )
     use_dof: BoolProperty(
         name="Camera Focus (DOF)",
-        description="Physical depth of field: sharp at focus, blurred near and far",
+        description="Sharp at focus, blurred beyond Far Start; ramp-editable in comp",
         default=False,
-        update=lambda s, c: _trigger_comp(c)
+        update=lambda s, c: _dof_changed(c)
     )
     dof_fstop: FloatProperty(
         name="F-Stop", default=2.8, min=0.1, max=32.0,
@@ -338,9 +477,40 @@ class VFXProject(bpy.types.PropertyGroup):
         name="Focus Distance (m)", default=10.0, min=0.0, max=500.0,
         update=lambda s, c: _dof_changed(c)
     )
-    dof_maxblur: FloatProperty(
-        name="Max Blur (px)", default=12.0, min=0.0, max=100.0,
-        update=lambda s, c: _dof_changed(c)
+    dof_mask_source: EnumProperty(
+        name="DOF Mask Source",
+        items=_mask_source_items,
+        default='NONE',
+        update=lambda s, c: _trigger_comp(c)
+    )
+    dof_mask_invert: BoolProperty(
+        name="Invert Mask", default=False,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    dof_mask_soft: FloatProperty(
+        name="Softness (px)", default=0.0, min=0.0, max=50.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    dof_mask_depth_start: FloatProperty(
+        name="Depth Start (m)", default=0.0, min=0.0, max=1000.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    dof_mask_depth_end: FloatProperty(
+        name="Depth End (m)", default=50.0, min=0.1, max=1000.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    dof_mask_luma_lo: FloatProperty(
+        name="Luma Lo", default=0.0, min=0.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    dof_mask_luma_hi: FloatProperty(
+        name="Luma Hi", default=1.0, min=0.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    dof_mask_ext_node: StringProperty(
+        name="Ext Node", default="",
+        description="Name of a node in comp whose output is used as mask",
+        update=lambda s, c: _trigger_comp(c)
     )
     use_lensdist: BoolProperty(
         name="Lens Distortion",
@@ -356,53 +526,57 @@ class VFXProject(bpy.types.PropertyGroup):
         name="Disperse", default=0.0, min=0.0, max=1.0,
         update=lambda s, c: _trigger_comp(c)
     )
-
-    # Cryptomatte
-    use_cryptomatte: BoolProperty(
-        name="Cryptomatte",
-        description="Enable Cryptomatte Object + Material passes for masking",
+    use_master_grade: BoolProperty(
+        name="Master Grade",
+        description="Final color grade over the whole comp (masked)",
         default=False,
         update=lambda s, c: _trigger_comp(c)
     )
-
-    # Color Match / Plate Matching
-    use_color_match: BoolProperty(
-        name="Color Match",
-        description="Enable color correction (plate matching)",
-        default=False,
+    grade_brightness: FloatProperty(
+        name="Brightness", default=0.0, min=-1.0, max=1.0,
         update=lambda s, c: _trigger_comp(c)
     )
-    color_match_preset: EnumProperty(
-        name="Preset",
-        items=(
-            ('NONE', "Off", "No color correction"),
-            ('WARM', "Warm", "Add warmth to the image"),
-            ('TEAL_ORANGE', "Teal & Orange", "Cinematic teal/orange look"),
-            ('COOL', "Cool", "Cool blue tones"),
-            ('FILM', "Film", "Desaturated film look"),
-        ),
+    grade_contrast: FloatProperty(
+        name="Contrast", default=0.0, min=-1.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    grade_saturation: FloatProperty(
+        name="Saturation", default=1.0, min=0.0, max=2.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    grade_mask_source: EnumProperty(
+        name="Grade Mask Source",
+        items=_mask_source_items,
         default='NONE',
         update=lambda s, c: _trigger_comp(c)
     )
-    color_match_strength: FloatProperty(
-        name="Strength", default=1.0, min=0.0, max=2.0,
-        description="Blend between original and color-corrected",
+    grade_mask_invert: BoolProperty(
+        name="Invert Mask", default=False,
         update=lambda s, c: _trigger_comp(c)
     )
-
-    # Light Groups
-    use_light_groups: BoolProperty(
-        name="Light Groups",
-        description="Enable light group passes for per-light control in comp",
-        default=False,
+    grade_mask_soft: FloatProperty(
+        name="Softness (px)", default=0.0, min=0.0, max=50.0,
         update=lambda s, c: _trigger_comp(c)
     )
-
-    # Cryptomatte
-    use_cryptomatte: BoolProperty(
-        name="Cryptomatte",
-        description="Enable Cryptomatte Object + Material passes for masking",
-        default=False,
+    grade_mask_depth_start: FloatProperty(
+        name="Depth Start (m)", default=0.0, min=0.0, max=1000.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    grade_mask_depth_end: FloatProperty(
+        name="Depth End (m)", default=50.0, min=0.1, max=1000.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    grade_mask_luma_lo: FloatProperty(
+        name="Luma Lo", default=0.0, min=0.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    grade_mask_luma_hi: FloatProperty(
+        name="Luma Hi", default=1.0, min=0.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    grade_mask_ext_node: StringProperty(
+        name="Ext Node", default="",
+        description="Name of a node in comp whose output is used as mask",
         update=lambda s, c: _trigger_comp(c)
     )
 
@@ -464,18 +638,13 @@ from .operators import (
     VFX_OT_create_background, VFX_OT_delete_background,
     VFX_OT_delete_shadow_pass, VFX_OT_refresh_proxies,
     VFX_OT_diagnostic,
+    VFX_OT_setup_light_groups, VFX_OT_apply_color_preset,
+    VFX_OT_preview_this_mask, VFX_OT_pick_cryptomatte,
 )
 from .ui import (
     VFX_UL_layers, VFX_PT_main, VFX_PT_post_effects,
     VFX_PT_compositor, VFX_PT_compositor_effects,
 )
-from .cryptomatte import setup_cryptomatte_for_layers, add_cryptomatte_nodes
-from .colormatch import get_or_create_color_match_group, apply_preset
-from .lightgroups import (
-    auto_assign_light_groups, enable_light_groups_on_view_layer,
-    add_light_group_output_nodes,
-)
-from .cryptomatte import setup_cryptomatte_for_layers, add_cryptomatte_nodes
 from .colormatch import get_or_create_color_match_group, apply_preset
 from .lightgroups import (
     auto_assign_light_groups, enable_light_groups_on_view_layer,

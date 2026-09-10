@@ -8,7 +8,6 @@ from .core import (
     create_empty_scene, sync_scene_settings,
 )
 from .materials import _trigger_comp
-from .cryptomatte import add_cryptomatte_nodes, setup_cryptomatte_for_layers
 from .colormatch import get_or_create_color_match_group, apply_preset
 from .lightgroups import add_light_group_output_nodes
 
@@ -243,7 +242,7 @@ def rebuild_comp_from_files(vfx, master):
         node["vfx_id"] = "BG"
         node["vfx_pass"] = "OBJECT"
         node.location = (0, 500)
-    if getattr(vfx, "use_fog", False) or getattr(vfx, "use_blur", False) or getattr(vfx, "use_dof", False):
+    if getattr(vfx, "use_fog", False) or getattr(vfx, "use_dof", False):
         _setup_fog_passes(vfx, master, force=True)
         fm = getattr(vfx, "fog_map_scene", None)
         if fm is not None:
@@ -334,7 +333,7 @@ def rebuild_comp(vfx, master):
     if bg_scene:
         valid_nodes.add("VFX_RL_BG")
         ensure_render_node(master, bg_scene, "VFX_RL_BG", "BACKGROUND", "BG", "OBJECT", x=0, y=y)
-    if getattr(vfx, "use_fog", False) or getattr(vfx, "use_blur", False) or getattr(vfx, "use_dof", False):
+    if getattr(vfx, "use_fog", False) or getattr(vfx, "use_dof", False):
         _setup_fog_passes(vfx, master, force=True)
         fm = getattr(vfx, "fog_map_scene", None)
         if fm is not None:
@@ -389,6 +388,401 @@ def _get_mist_socket(nt):
         if n.outputs.get("Image"):
             return n.outputs["Image"]
     return None
+
+
+def _get_depth_socket(nt):
+    """Z depth in meters from the live FOGMAP render layers (1 - mist fallback)."""
+    n = nt.nodes.get("VFX_RL_FOGMAP")
+    if n is None:
+        return None
+    if n.outputs.get("Depth"):
+        return n.outputs["Depth"]
+    if n.outputs.get("Z"):
+        return n.outputs["Z"]
+    return None
+
+
+def _to_float(nt, sock, name_prefix, loc):
+    """Convert Color socket to float (red channel) if needed."""
+    if sock is None or sock.type == 'VALUE':
+        return sock
+    sep = nt.nodes.get(f"MASK_{name_prefix}_SEP")
+    if sep is None:
+        sep = _new_node(nt, "ShaderNodeSeparateColor", "CompositorNodeSeparateColor")
+        if sep is None:
+            return sock
+        sep.name = f"MASK_{name_prefix}_SEP"
+        sep.label = f"MASK {name_prefix} to float"
+    sep.location = loc
+    for l in list(sep.inputs[0].links):
+        nt.links.remove(l)
+    nt.links.new(sock, sep.inputs[0])
+    return sep.outputs[0]
+
+
+def _math_node(nt, op, a, b, name, loc):
+    m = nt.nodes.get(name)
+    if m is None:
+        m = _new_node(nt, "CompositorNodeMath", "ShaderNodeMath")
+        if m is None:
+            return None
+        m.name = name
+    m.operation = op
+    m.label = f"MASK {name}"
+    m.location = loc
+    if a is not None:
+        for l in list(m.inputs[0].links):
+            nt.links.remove(l)
+        nt.links.new(a, m.inputs[0])
+    if b is not None:
+        for l in list(m.inputs[1].links):
+            nt.links.remove(l)
+        nt.links.new(b, m.inputs[1])
+    return m
+
+
+def _set_maprange(mr, lo, hi):
+    for name, val in (("From Min", lo), ("From Max", hi)):
+        s = mr.inputs.get(name)
+        if s is not None:
+            try:
+                s.default_value = val
+            except Exception:
+                pass
+    try:
+        mr.interpolation_type = 'SMOOTHSTEP'
+    except Exception:
+        pass
+
+
+def build_mask(nt, props, name_prefix, source, invert, soft,
+               depth_start, depth_end, luma_lo, luma_hi,
+               ext_node="", image_sock=None, depth_sock=None):
+    """Build (or reuse) a mask chain and return a float socket 0..1.
+
+    All nodes are named MASK_<name_prefix>* and reused on rebuild.
+    """
+    sock = None
+    if source == 'EXT':
+        ext = nt.nodes.get(ext_node) if ext_node else None
+        if ext is not None and ext.outputs:
+            sock = ext.outputs[0]
+    elif source == 'ALPHA' and image_sock is not None:
+        sep = nt.nodes.get(f"MASK_{name_prefix}_ASEP")
+        if sep is None:
+            sep = _new_node(nt, "ShaderNodeSeparateColor", "CompositorNodeSeparateColor")
+            if sep is not None:
+                sep.name = f"MASK_{name_prefix}_ASEP"
+                sep.label = f"MASK {name_prefix} alpha"
+        if sep is not None:
+            sep.location = (-2600, -400)
+            for l in list(sep.inputs[0].links):
+                nt.links.remove(l)
+            nt.links.new(image_sock, sep.inputs[0])
+            sock = sep.outputs[0]
+    elif source == 'DEPTH':
+        ds = depth_sock
+        if ds is None:
+            ds = _get_mist_socket(nt)
+        if ds is not None:
+            mr = nt.nodes.get(f"MASK_{name_prefix}_MR")
+            if mr is None:
+                mr = _new_node(nt, "ShaderNodeMapRange", "CompositorNodeMapRange")
+                if mr is not None:
+                    mr.name = f"MASK_{name_prefix}_MR"
+                    mr.label = f"MASK {name_prefix} depth"
+            if mr is not None:
+                mr.location = (-2600, 300)
+                _set_maprange(mr, depth_start, depth_end)
+                v = mr.inputs.get("Value")
+                if v is not None:
+                    for l in list(v.links):
+                        nt.links.remove(l)
+                    nt.links.new(_to_float(nt, ds, name_prefix + "D", (-2800, 300)), v)
+                sock = mr.outputs.get("Result")
+    elif source == 'LUMA' and image_sock is not None:
+        rgb = nt.nodes.get(f"MASK_{name_prefix}_RGB")
+        if rgb is None:
+            rgb = _new_node(nt, "CompositorNodeRGBToBW", "ShaderNodeRGBToBW")
+            if rgb is not None:
+                rgb.name = f"MASK_{name_prefix}_RGB"
+                rgb.label = f"MASK {name_prefix} luma"
+        if rgb is not None:
+            rgb.location = (-2700, -150)
+            for l in list(rgb.inputs[0].links):
+                nt.links.remove(l)
+            nt.links.new(image_sock, rgb.inputs[0])
+            mr = nt.nodes.get(f"MASK_{name_prefix}_LMR")
+            if mr is None:
+                mr = _new_node(nt, "ShaderNodeMapRange", "CompositorNodeMapRange")
+                if mr is not None:
+                    mr.name = f"MASK_{name_prefix}_LMR"
+                    mr.label = f"MASK {name_prefix} luma range"
+            if mr is not None:
+                mr.location = (-2600, -150)
+                _set_maprange(mr, luma_lo, luma_hi)
+                v = mr.inputs.get("Value")
+                if v is not None:
+                    for l in list(v.links):
+                        nt.links.remove(l)
+                    nt.links.new(rgb.outputs[0], v)
+                sock = mr.outputs.get("Result")
+
+    # Invert: 1 - x
+    if invert and sock is not None:
+        sock = _math_node(nt, 'SUBTRACT', None, sock, f"MASK_{name_prefix}_INV", (-2400, 0))
+        if sock is not None:
+            sock.node.inputs[0].default_value = 1.0
+
+    # Softness: tiny blur rounds mask edges
+    try:
+        soft = float(soft or 0.0)
+    except Exception:
+        soft = 0.0
+    if soft > 0.001 and sock is not None:
+        bl = nt.nodes.get(f"MASK_{name_prefix}_SOFT")
+        if bl is None:
+            try:
+                bl = nt.nodes.new("CompositorNodeBlur")
+                if bl is not None:
+                    bl.name = f"MASK_{name_prefix}_SOFT"
+            except Exception:
+                bl = None
+        if bl is not None:
+            bl.label = f"MASK {name_prefix} soft"
+            bl.location = (-2300, 0)
+            try:
+                bl.blur_method = 'GAUSS'
+            except Exception:
+                pass
+            try:
+                bl.size_x = max(1, int(round(soft)))
+                bl.size_y = max(1, int(round(soft)))
+            except Exception:
+                pass
+            for l in list(bl.inputs[0].links):
+                nt.links.remove(l)
+            nt.links.new(sock, bl.inputs[0])
+            try:
+                bl.inputs["Size"].default_value = 1.0
+            except Exception:
+                pass
+            sock = bl.outputs[0]
+    return sock
+
+
+def _apply_mask(nt, prefix, orig_sock, eff_sock, mask_sock, loc_y=0):
+    """Wrap an effect: out = Mix(fac=MASK, A=orig, B=eff). Returns output socket."""
+    if mask_sock is None:
+        return eff_sock
+    mix, fac, a, b, out = _fog_mix_node(nt, (1300, loc_y))
+    if mix is None or fac is None or a is None or b is None or out is None:
+        return eff_sock
+    mix.name = f"VFX_MASKMIX_{prefix}"
+    mix.label = f"{prefix} MASK"
+    mix["vfx_maskmix"] = 1
+    nt.links.new(mask_sock, fac)
+    nt.links.new(orig_sock, a)
+    nt.links.new(eff_sock, b)
+    return out
+
+
+def _cleanup_mask_nodes(nt):
+    """Remove all MASK_* helper nodes and mask mix nodes not reconnected this build.
+    Called at the start of build_comp_assembly; builders recreate/reuse by name."""
+    for node in list(nt.nodes):
+        n = node.name
+        if n.startswith("MASK_") or n.startswith("VFX_MASKMIX_"):
+            nt.nodes.remove(node)
+
+
+def _remove_vfx_nodes(nt, *names):
+    for n in names:
+        node = nt.nodes.get(n)
+        if node is not None:
+            nt.nodes.remove(node)
+
+
+def _ensure_dof_ramp_group():
+    """Group: Depth (m) -> abs distance to focus -> ColorRamp (EDITABLE) -> Max Blur.
+    Outputs 'Blur' 0..1 used as the variable-size factor of the DOF blur node.
+    The ColorRamp node inside is user-editable in the node editor.
+    """
+    ng = bpy.data.node_groups.get("VFX_DofRamp")
+    if ng is None:
+        ng = bpy.data.node_groups.new("VFX_DofRamp", 'CompositorNodeTree')
+    have = {s.name for s in ng.interface.items_tree if hasattr(s, "in_out")}
+    need = {("Depth", 'INPUT', 'NodeSocketFloat'), ("Focus", 'INPUT', 'NodeSocketFloat'),
+            ("Far Start", 'INPUT', 'NodeSocketFloat'), ("Far End", 'INPUT', 'NodeSocketFloat'),
+            ("Max Blur", 'INPUT', 'NodeSocketFloat'), ("Blur", 'OUTPUT', 'NodeSocketFloat')}
+    if not need.issubset({(s.name, s.in_out, s.socket_type) for s in ng.interface.items_tree if hasattr(s, "in_out")}):
+        ng.nodes.clear()
+        try:
+            ng.interface.items_clear()
+        except Exception:
+            pass
+        for name, io, typ in sorted(need, key=lambda t: t[1] != 'INPUT'):
+            try:
+                ng.interface.new_socket(name, in_out=io, socket_type=typ)
+            except Exception:
+                pass
+        gin = ng.nodes.new("NodeGroupInput")
+        gin.location = (-700, 0)
+        gout = ng.nodes.new("NodeGroupOutput")
+        gout.location = (500, 0)
+        # |depth - focus|
+        sub = ng.nodes.new("CompositorNodeMath")
+        sub.operation = 'SUBTRACT'
+        sub.name = "DR_SUB"
+        sub.location = (-480, 100)
+        ng.links.new(gin.outputs.get("Depth"), sub.inputs[0])
+        ng.links.new(gin.outputs.get("Focus"), sub.inputs[1])
+        ab = ng.nodes.new("CompositorNodeMath")
+        ab.operation = 'ABSOLUTE'
+        ab.name = "DR_ABS"
+        ab.location = (-320, 100)
+        ng.links.new(sub.outputs[0], ab.inputs[0])
+        # distance -> 0..1 over far range (input for the ramp)
+        mr = ng.nodes.new("ShaderNodeMapRange")
+        mr.name = "DR_MR"
+        mr.location = (-150, 100)
+        try:
+            mr.interpolation_type = 'LINEAR'
+        except Exception:
+            pass
+        ng.links.new(ab.outputs[0], mr.inputs.get("Value"))
+        ng.links.new(gin.outputs.get("Far Start"), mr.inputs.get("From Min"))
+        ng.links.new(gin.outputs.get("Far End"), mr.inputs.get("From Max"))
+        # EDITABLE ramp: black = sharp, white = max blur
+        ramp = ng.nodes.new("CompositorNodeValToRGB")
+        ramp.name = "DR_RAMP"
+        ramp.label = "EDIT ME: sharp -> blurry"
+        ramp.location = (50, 100)
+        try:
+            ramp.color_ramp.elements[0].position = 0.0
+            ramp.color_ramp.elements[0].color = (0.0, 0.0, 0.0, 1.0)
+            ramp.color_ramp.elements[1].position = 1.0
+            ramp.color_ramp.elements[1].color = (1.0, 1.0, 1.0, 1.0)
+        except Exception:
+            pass
+        ng.links.new(mr.outputs.get("Result"), ramp.inputs[0])
+        # ramp -> max blur px
+        mul = ng.nodes.new("CompositorNodeMath")
+        mul.operation = 'MULTIPLY'
+        mul.name = "DR_MUL"
+        mul.location = (250, 100)
+        ng.links.new(ramp.outputs[0], mul.inputs[0])
+        ng.links.new(gin.outputs.get("Max Blur"), mul.inputs[1])
+        ng.links.new(mul.outputs[0], gout.inputs.get("Blur"))
+    return ng
+
+
+def _ensure_grade_group(vfx, name="VFX_MasterGrade"):
+    """Create/update a grade node group (Bright/Contrast + Hue/Sat)."""
+    ng = bpy.data.node_groups.get(name)
+    if ng is None:
+        ng = bpy.data.node_groups.new(name, 'CompositorNodeTree')
+    ng.nodes.clear()
+    try:
+        ng.interface.items_clear()
+    except Exception:
+        pass
+    ng.interface.new_socket("Image", in_out='INPUT', socket_type='NodeSocketColor')
+    ng.interface.new_socket("Brightness", in_out='INPUT', socket_type='NodeSocketFloat')
+    ng.interface.new_socket("Contrast", in_out='INPUT', socket_type='NodeSocketFloat')
+    ng.interface.new_socket("Saturation", in_out='INPUT', socket_type='NodeSocketFloat')
+    ng.interface.new_socket("Image", in_out='OUTPUT', socket_type='NodeSocketColor')
+    gin = ng.nodes.new("NodeGroupInput")
+    gin.location = (-500, 0)
+    gout = ng.nodes.new("NodeGroupOutput")
+    gout.location = (350, 0)
+    cur = gin.outputs.get("Image")
+    bc = _new_node(ng, "CompositorNodeBrightContrast", "ShaderNodeBrightContrast")
+    if bc is not None:
+        bc.name = "MG_BC"
+        bc.location = (-250, 0)
+        try:
+            bc.use_clamp = True
+        except Exception:
+            pass
+        for l in list(bc.inputs[0].links):
+            ng.links.remove(l)
+        ng.links.new(cur, bc.inputs[0])
+        b = bc.inputs.get("Bright")
+        c = bc.inputs.get("Contrast")
+        bs = gin.outputs.get("Brightness")
+        cs = gin.outputs.get("Contrast")
+        if b is not None and bs is not None:
+            ng.links.new(bs, b)
+        elif b is not None:
+            b.default_value = 0.0
+        if c is not None and cs is not None:
+            ng.links.new(cs, c)
+        elif c is not None:
+            c.default_value = 0.0
+        o = [s for s in bc.outputs if s.type == 'RGBA']
+        cur = o[0] if o else cur
+    hs = _new_node(ng, "CompositorNodeHueSat", "ShaderNodeHueSaturation")
+    if hs is not None:
+        hs.name = "MG_HS"
+        hs.location = (100, 0)
+        i = [s for s in hs.inputs if s.type == 'RGBA']
+        if i and cur is not None:
+            ng.links.new(cur, i[0])
+            ss = gin.outputs.get("Saturation")
+            sat_in = None
+            for s in hs.inputs:
+                if s.name.lower() == 'saturation':
+                    sat_in = s
+                    break
+            if sat_in is not None and ss is not None:
+                ng.links.new(ss, sat_in)
+            o = [s for s in hs.outputs if s.type == 'RGBA']
+            cur = o[0] if o else cur
+    oi = gout.inputs.get("Image")
+    if oi is not None and cur is not None:
+        ng.links.new(cur, oi)
+    return ng
+
+
+def ensure_crypto_mask_node(vfx, master, obj_name):
+    """Cryptomatte mask node fed by the live FOGMAP render layer;
+    matte is set to the picked object. Used as EXT mask source."""
+    nt = get_comp_tree(master)
+    if not nt:
+        return None
+    fm = getattr(vfx, "fog_map_scene", None)
+    if fm is not None:
+        for vl in fm.view_layers:
+            try:
+                vl.use_pass_cryptomatte_object = True
+            except Exception:
+                pass
+    rl = nt.nodes.get("VFX_RL_FOGMAP")
+    node = nt.nodes.get("VFX_CRYPTO_PICK")
+    if node is None:
+        try:
+            node = nt.nodes.new("CompositorNodeCryptomatte")
+        except Exception:
+            return None
+        node.name = "VFX_CRYPTO_PICK"
+        node.label = "CRYPTO PICK (pipette)"
+        node.location = (-350, -700)
+    if rl is not None and node.inputs:
+        img_in = node.inputs.get("Image") or node.inputs[0]
+        try:
+            nt.links.new(rl.outputs.get("Image") or rl.outputs[0], img_in)
+        except Exception:
+            pass
+    try:
+        node.matte_id = obj_name
+    except Exception:
+        pass
+    try:
+        node.layer_name = "CryptoObject00"
+    except Exception:
+        pass
+    return node
 
 
 def _cleanup_fog_nodes(nt):
@@ -497,6 +891,7 @@ def _build_fog_group2(vfx, has_bg=True):
             pass
     ng.interface.new_socket("Mist", in_out='INPUT', socket_type='NodeSocketColor')
     ng.interface.new_socket("Strength", in_out='INPUT', socket_type='NodeSocketFloat')
+    ng.interface.new_socket("Extra Mask", in_out='INPUT', socket_type='NodeSocketFloat')
     ng.interface.new_socket("Fog Color", in_out='INPUT', socket_type='NodeSocketColor')
     ng.interface.new_socket("Ramp Black", in_out='INPUT', socket_type='NodeSocketFloat')
     ng.interface.new_socket("Ramp White", in_out='INPUT', socket_type='NodeSocketFloat')
@@ -547,7 +942,16 @@ def _build_fog_group2(vfx, has_bg=True):
         return ng, meta
     ng.links.new(mr.outputs.get("Result"), mstr.inputs[0])
     ng.links.new(g_in("Strength"), mstr.inputs[1])
-    mask_out = mstr.outputs[0]
+    # extra mask (from build_mask) limits where fog acts at all
+    mstr2 = math_node('MULTIPLY', (-400, 300))
+    if mstr2 is not None:
+        ng.links.new(mstr.outputs[0], mstr2.inputs[0])
+        em = g_in("Extra Mask")
+        if em is not None:
+            ng.links.new(em, mstr2.inputs[1])
+        mask_out = mstr2.outputs[0]
+    else:
+        mask_out = mstr.outputs[0]
     sep = _new_node(ng, "ShaderNodeSeparateColor", "CompositorNodeSeparateColor")
     if sep is not None:
         sep.location = (-800, 0)
@@ -637,6 +1041,13 @@ def build_comp_assembly(vfx, master, nt=None):
         if fg is not None:
             nt.nodes.remove(fg)
     _cleanup_fog_nodes(nt)
+    _cleanup_mask_nodes(nt)
+    _remove_vfx_nodes(nt, "VFX_BLUR", "VFX_BLURRAMP", "VFX_BLURMATH")
+    for node in list(nt.nodes):
+        if node.name.startswith("VFX_GRADE_L"):
+            nt.nodes.remove(node)
+        elif node.type == 'CRYPTOMATTE' and node.name != "VFX_CRYPTO_PICK":
+            nt.nodes.remove(node)
     sockets = []
     for layer in reversed(vfx.layers):
         if not layer.enabled:
@@ -651,6 +1062,59 @@ def build_comp_assembly(vfx, master, nt=None):
             ob = nt.nodes.get(f"VFX_RL_{layer.id}")
             if ob and ob.outputs.get("Image"):
                 ob_sock = ob.outputs["Image"]
+        if getattr(layer, "use_grade", False) and ob_sock is not None:
+            try:
+                gnode_l = nt.nodes.get(f"VFX_GRADE_L{layer.id}")
+                if gnode_l is not None and gnode_l.type != 'GROUP':
+                    nt.nodes.remove(gnode_l)
+                    gnode_l = None
+                if gnode_l is None:
+                    for bid in ("CompositorNodeGroup", "ShaderNodeGroup", "NodeGroup"):
+                        try:
+                            gnode_l = nt.nodes.new(bid)
+                            break
+                        except Exception:
+                            continue
+                    if gnode_l is not None:
+                        gnode_l.name = f"VFX_GRADE_L{layer.id}"
+                if gnode_l is not None:
+                    gnode_l.node_tree = _ensure_grade_group(vfx, f"VFX_LayerGrade_{layer.id}")
+                    gnode_l.label = f"GRADE {layer.layer_name}"
+                    gnode_l.location = (-200, -900)
+                    ii = None
+                    for s in gnode_l.inputs:
+                        if s.type == 'RGBA':
+                            ii = s
+                            break
+                    if ii is not None:
+                        for l in list(ii.links):
+                            nt.links.remove(l)
+                        nt.links.new(ob_sock, ii)
+                    for name, val in (("Brightness", layer.grade_bright),
+                                      ("Contrast", layer.grade_contrast),
+                                      ("Saturation", layer.grade_sat)):
+                        s = gnode_l.inputs.get(name)
+                        if s is not None:
+                            try:
+                                s.default_value = val
+                            except Exception:
+                                pass
+                    gs = None
+                    for s in gnode_l.outputs:
+                        if s.type == 'RGBA':
+                            gs = s
+                            break
+                    if gs is not None:
+                        src = 'ALPHA' if (getattr(layer, "use_alpha_mask", False) and getattr(layer, "grade_mask_source", 'NONE') == 'NONE') else getattr(layer, "grade_mask_source", 'NONE')
+                        msock = build_mask(
+                            nt, vfx, f"L{layer.id}", src,
+                            layer.grade_mask_invert, layer.grade_mask_soft,
+                            layer.grade_mask_depth_start, layer.grade_mask_depth_end,
+                            layer.grade_mask_luma_lo, layer.grade_mask_luma_hi,
+                            ext_node=layer.grade_mask_ext_node, image_sock=ob_sock)
+                        ob_sock = _apply_mask(nt, f"L{layer.id}", ob_sock, gs, msock)
+            except Exception as e:
+                print("VFX layer grade error:", e)
         if getattr(layer, "shadow_mode", "CAST") == 'RECEIVE':
             if ob_sock:
                 sockets.append((layer, "OBJ", ob_sock))
@@ -704,6 +1168,26 @@ def build_comp_assembly(vfx, master, nt=None):
                     s = gi(name)
                     if s is not None:
                         s.default_value = val
+                # Optional extra mask on fog (from MASK_* chain)
+                try:
+                    em = gi("Extra Mask")
+                    fmask = build_mask(
+                        nt, vfx, "FOG", getattr(vfx, "fog_mask_source", 'NONE'),
+                        vfx.fog_mask_invert, vfx.fog_mask_soft,
+                        vfx.fog_mask_depth_start, vfx.fog_mask_depth_end,
+                        vfx.fog_mask_luma_lo, vfx.fog_mask_luma_hi,
+                        ext_node=vfx.fog_mask_ext_node, image_sock=mist)
+                    if em is not None:
+                        if fmask is not None:
+                            for l in list(em.links):
+                                nt.links.remove(l)
+                            nt.links.new(fmask, em)
+                        else:
+                            em.default_value = 1.0
+                        if fmask is not None and getattr(vfx, "use_mask", False) and getattr(vfx, "mask_source", 'NONE') == 'FOG':
+                            view_sock = fmask
+                except Exception as e:
+                    print("VFX fog mask error:", e)
                 scol = gi("Fog Color")
                 if scol is not None:
                     try:
@@ -783,156 +1267,156 @@ def build_comp_assembly(vfx, master, nt=None):
             current = outs[0] if outs else mix.outputs[0]
             mix_index += 1
 
-    _PX_BLUR = 1100
     _PX_DOF = 1400
     _PX_GLARE = 1700
     _PX_LD = 2000
-    _PX_OUT = 2300
+    _PX_GRADE = 2300
+    _PX_OUT = 2600
     _PY = 0
 
-    if getattr(vfx, "use_blur", False):
-        try:
-            _ensure_fogmap(nt, vfx, master)
-            mist_b = _get_mist_socket(nt)
-            if mist_b is not None:
-                mr = nt.nodes.get("VFX_BLURRAMP")
-                if mr is None:
-                    mr = _new_node(nt, "CompositorNodeMapRange", "ShaderNodeMapRange")
-                    if mr is not None:
-                        mr.name = "VFX_BLURRAMP"
-                        mr.label = "BLUR RAMP"
-                if mr is not None:
-                    mr.location = (_PX_BLUR - 200, _PY + 200)
-                    try:
-                        mr.interpolation_type = 'SMOOTHSTEP'
-                    except Exception:
-                        pass
-                    v_in = mr.inputs.get("Value")
-                    if v_in is not None:
-                        for l in list(v_in.links):
-                            nt.links.remove(l)
-                        nt.links.new(mist_b, v_in)
-                    _safe_set(mr, "From Min", vfx.blur_ramp_black)
-                    _safe_set(mr, "From Max", vfx.blur_ramp_white)
-                bm = nt.nodes.get("VFX_BLURMATH")
-                if bm is None:
-                    bm = _new_node(nt, "CompositorNodeMath", "ShaderNodeMath")
-                    if bm is not None:
-                        bm.name = "VFX_BLURMATH"
-                        bm.label = "BLUR SIZE"
-                if bm is not None:
-                    bm.location = (_PX_BLUR, _PY + 200)
-                    bm.operation = 'MULTIPLY'
-                    bm.inputs[1].default_value = vfx.blur_size
-                    if mr is not None and mr.outputs.get("Result"):
-                        for l in list(bm.inputs[0].links):
-                            nt.links.remove(l)
-                        nt.links.new(mr.outputs["Result"], bm.inputs[0])
-                bl = nt.nodes.get("VFX_BLUR")
-                if bl is None:
-                    try:
-                        bl = nt.nodes.new("CompositorNodeBlur")
-                        bl.name = "VFX_BLUR"
-                        bl.label = "ATMO BLUR"
-                    except Exception:
-                        bl = None
-                if bl is not None:
-                    bl.location = (_PX_BLUR, _PY)
-                    try:
-                        bl.use_variable_size = True
-                    except Exception:
-                        pass
-                    for attr in ("blur_method", "filter_type"):
-                        _safe_set(bl, attr, 'GAUSS')
-                    img_in = bl.inputs.get("Image")
-                    if img_in is None and bl.inputs:
-                        img_in = bl.inputs[0]
-                    if img_in is not None:
-                        for l in list(img_in.links):
-                            nt.links.remove(l)
-                        nt.links.new(current, img_in)
-                    size_in = bl.inputs.get("Size")
-                    if size_in is not None and bm is not None:
-                        for l in list(size_in.links):
-                            nt.links.remove(l)
-                        nt.links.new(bm.outputs[0], size_in)
-                    if bl.outputs:
-                        current = bl.outputs[0]
-                    if getattr(vfx, 'use_mask', False) and getattr(vfx, 'mask_source', 'NONE') == 'BLUR' and mr is not None:
-                        view_sock = mr.outputs.get("Result")
-        except Exception as e:
-            print("VFX blur error:", e)
-    else:
-        _remove_nodes(nt, "VFX_BLUR", "VFX_BLURRAMP", "VFX_BLURMATH")
-
+    # -------------------------------------------------------------
+    # CAMERA FOCUS (DOF): depth -> editable ColorRamp -> variable blur
+    # Sharp at focus distance, smooth blur growth up to Far End.
+    # -------------------------------------------------------------
     if getattr(vfx, "use_dof", False):
         try:
             _ensure_fogmap(nt, vfx, master)
-            fmn = nt.nodes.get("VFX_RL_FOGMAP")
-            if fmn is not None and fmn.outputs.get("Depth"):
-                df = nt.nodes.get("VFX_DOF")
-                if df is None:
-                    try:
-                        df = nt.nodes.new("CompositorNodeDefocus")
-                        df.name = "VFX_DOF"
-                        df.label = "CAMERA DOF"
-                    except Exception:
-                        df = None
-                if df is not None:
-                    df.location = (_PX_DOF, _PY)
-                    for attr, val in (("fstop", vfx.dof_fstop), ("f_stop", vfx.dof_fstop)):
-                        _safe_set(df, attr, val)
-                    for attr, val in (("focal_distance", vfx.dof_focus), ("focus_distance", vfx.dof_focus), ("distance", vfx.dof_focus)):
-                        _safe_set(df, attr, val)
-                    for attr, val in (("blur_max", vfx.dof_maxblur), ("max_blur", vfx.dof_maxblur)):
-                        _safe_set(df, attr, val)
-                    img_in = df.inputs.get("Image")
-                    z_in = df.inputs.get("Z")
-                    if img_in is not None:
-                        for l in list(img_in.links):
+            depth_b = _get_depth_socket(nt)
+            if depth_b is None:
+                _remove_nodes(nt, "VFX_DOF", "VFX_DOF_PRE")
+            if depth_b is not None:
+                pre = nt.nodes.get("VFX_DOF_PRE")
+                if pre is not None and pre.type != 'GROUP':
+                    nt.nodes.remove(pre)
+                    pre = None
+                if pre is None:
+                    _ensure_dof_ramp_group()
+                    for bid in ("CompositorNodeGroup", "ShaderNodeGroup", "NodeGroup"):
+                        try:
+                            pre = nt.nodes.new(bid)
+                            break
+                        except Exception:
+                            continue
+                    if pre is not None:
+                        pre.name = "VFX_DOF_PRE"
+                if pre is not None:
+                    pre.node_tree = _ensure_dof_ramp_group()
+                    pre.label = "DOF FOCUS RAMP (edit ramp!)"
+                    pre.location = (_PX_DOF - 400, _PY + 240)
+                    din = pre.inputs.get("Depth")
+                    if din is not None:
+                        for l in list(din.links):
                             nt.links.remove(l)
-                        nt.links.new(current, img_in)
-                    if z_in is not None:
-                        for l in list(z_in.links):
-                            nt.links.remove(l)
-                        nt.links.new(fmn.outputs["Depth"], z_in)
-                    if df.outputs:
-                        current = df.outputs[0]
-                    if getattr(vfx, 'use_mask', False) and getattr(vfx, 'mask_source', 'NONE') == 'DOF' and fmn is not None:
-                        view_sock = fmn.outputs.get("Depth")
+                        nt.links.new(depth_b, din)
+                    far0 = vfx.dof_focus + max(vfx.dof_far_start, 0.01)
+                    far1 = vfx.dof_focus + max(vfx.dof_far_end, far0 + 0.01)
+                    for name, val in (("Focus", vfx.dof_focus), ("Far Start", far0),
+                                      ("Far End", far1), ("Max Blur", vfx.dof_maxblur)):
+                        s = pre.inputs.get(name)
+                        if s is not None:
+                            try:
+                                s.default_value = val
+                            except Exception:
+                                pass
+                    blur = nt.nodes.get("VFX_DOF")
+                    if blur is not None and blur.type != 'BLUR':
+                        nt.nodes.remove(blur)
+                        blur = None
+                    if blur is None:
+                        try:
+                            blur = nt.nodes.new("CompositorNodeBlur")
+                            blur.name = "VFX_DOF"
+                            blur.label = "DOF BLUR"
+                        except Exception:
+                            blur = None
+                    if blur is not None:
+                        blur.location = (_PX_DOF, _PY)
+                        try:
+                            blur.use_variable_size = True
+                        except Exception:
+                            pass
+                        for attr in ("blur_method", "filter_type"):
+                            _safe_set(blur, attr, 'GAUSS')
+                        try:
+                            blur.size_x = 64
+                            blur.size_y = 64
+                        except Exception:
+                            pass
+                        orig_in = current
+                        img_in = blur.inputs.get("Image")
+                        if img_in is None and blur.inputs:
+                            img_in = blur.inputs[0]
+                        if img_in is not None:
+                            for l in list(img_in.links):
+                                nt.links.remove(l)
+                            nt.links.new(orig_in, img_in)
+                        sz = blur.inputs.get("Size")
+                        if sz is not None:
+                            for l in list(sz.links):
+                                nt.links.remove(l)
+                            nt.links.new(pre.outputs.get("Blur"), sz)
+                        blurred = blur.outputs[0] if blur.outputs else orig_in
+                        msock = build_mask(
+                            nt, vfx, "DOF", getattr(vfx, "dof_mask_source", 'NONE'),
+                            vfx.dof_mask_invert, vfx.dof_mask_soft,
+                            vfx.dof_mask_depth_start, vfx.dof_mask_depth_end,
+                            vfx.dof_mask_luma_lo, vfx.dof_mask_luma_hi,
+                            ext_node=vfx.dof_mask_ext_node, image_sock=orig_in,
+                            depth_sock=depth_b)
+                        current = _apply_mask(nt, "DOF", orig_in, blurred, msock, _PY)
+                        if msock is not None and getattr(vfx, "use_mask", False) and getattr(vfx, "mask_source", 'NONE') == 'DOF':
+                            view_sock = msock
         except Exception as e:
             print("VFX dof error:", e)
     else:
-        _remove_nodes(nt, "VFX_DOF")
+        _remove_nodes(nt, "VFX_DOF", "VFX_DOF_PRE")
 
     if getattr(vfx, "use_glare", False):
-        old_gl = nt.nodes.get("VFX_GLARE")
-        if old_gl is not None:
-            nt.nodes.remove(old_gl)
-        gl = _new_node(nt, "CompositorNodeGlare")
-        if gl is not None:
-            gl.name = "VFX_GLARE"
-            gl.label = "GLARE"
-            gl.location = (_PX_GLARE, _PY)
+        try:
+            gl = nt.nodes.get("VFX_GLARE")
+            if gl is not None and gl.type != 'GLARE':
+                nt.nodes.remove(gl)
+                gl = None
+            if gl is None:
+                gl = _new_node(nt, "CompositorNodeGlare")
+            if gl is not None:
+                gl.name = "VFX_GLARE"
+                gl.label = "GLARE"
+                gl.location = (_PX_GLARE, _PY)
 
-            # Glare TYPE is a MENU input socket, not a node property
-            _set_glare_type(gl, vfx.glare_type)
+                # Glare TYPE is a MENU input socket, not a node property
+                _set_glare_type(gl, vfx.glare_type)
 
-            # Threshold, Size, Strength — all via input sockets
-            _set_socket(gl, "Threshold", vfx.glare_threshold)
-            _set_socket(gl, "Size", vfx.glare_size)
-            _set_socket(gl, "Strength", vfx.glare_strength)
+                # Threshold, Size, Strength — all via input sockets
+                _set_socket(gl, "Threshold", vfx.glare_threshold)
+                _set_socket(gl, "Size", vfx.glare_size)
+                _set_socket(gl, "Strength", vfx.glare_strength)
 
-            # Connect image input
-            if gl.inputs:
-                nt.links.new(current, gl.inputs[0])
-            if gl.outputs:
-                current = gl.outputs[0]
+                orig_in = current
+                if gl.inputs:
+                    for l in list(gl.inputs[0].links):
+                        nt.links.remove(l)
+                    nt.links.new(orig_in, gl.inputs[0])
+                glowed = gl.outputs[0] if gl.outputs else orig_in
+                msock = build_mask(
+                    nt, vfx, "GLARE", getattr(vfx, "glare_mask_source", 'NONE'),
+                    vfx.glare_mask_invert, vfx.glare_mask_soft,
+                    vfx.glare_mask_depth_start, vfx.glare_mask_depth_end,
+                    vfx.glare_mask_luma_lo, vfx.glare_mask_luma_hi,
+                    ext_node=vfx.glare_mask_ext_node, image_sock=orig_in)
+                current = _apply_mask(nt, "GLARE", orig_in, glowed, msock, _PY - 150)
+                if msock is not None and getattr(vfx, "use_mask", False) and getattr(vfx, "mask_source", 'NONE') == 'GLARE':
+                    view_sock = msock
+        except Exception as e:
+            print("VFX glare error:", e)
     else:
         _remove_nodes(nt, "VFX_GLARE")
 
     if getattr(vfx, "use_lensdist", False):
         ld = nt.nodes.get("VFX_LENSDIST")
+        if ld is not None and ld.type != 'LENSDIST':
+            nt.nodes.remove(ld)
+            ld = None
         if ld is None:
             try:
                 ld = nt.nodes.new("CompositorNodeLensdist")
@@ -942,8 +1426,19 @@ def build_comp_assembly(vfx, master, nt=None):
                 ld = None
         if ld is not None:
             ld.location = (_PX_LD, _PY)
-            _safe_set(ld, "distort", vfx.lensdist_distort)
-            _safe_set(ld, "dispersion", vfx.lensdist_disperse)
+            # Set by exact socket name so panel values always match the node
+            for name, val in (("Distort", vfx.lensdist_distort), ("Dispersion", vfx.lensdist_disperse)):
+                s = ld.inputs.get(name)
+                if s is None:
+                    for si in ld.inputs:
+                        if si.name.lower() == name.lower():
+                            s = si
+                            break
+                if s is not None:
+                    try:
+                        s.default_value = val
+                    except Exception:
+                        pass
             img_in = ld.inputs.get("Image")
             if img_in is None and ld.inputs:
                 img_in = ld.inputs[0]
@@ -956,6 +1451,68 @@ def build_comp_assembly(vfx, master, nt=None):
     else:
         _remove_nodes(nt, "VFX_LENSDIST")
 
+    # -------------------------------------------------------------
+    # MASTER GRADE: final color grade over the whole comp + mask
+    # -------------------------------------------------------------
+    if getattr(vfx, "use_master_grade", False):
+        try:
+            gnode = nt.nodes.get("VFX_GRADE_MASTER")
+            if gnode is not None and gnode.type != 'GROUP':
+                nt.nodes.remove(gnode)
+                gnode = None
+            if gnode is None:
+                for bid in ("CompositorNodeGroup", "ShaderNodeGroup", "NodeGroup"):
+                    try:
+                        gnode = nt.nodes.new(bid)
+                        break
+                    except Exception:
+                        continue
+                if gnode is not None:
+                    gnode.name = "VFX_GRADE_MASTER"
+            if gnode is not None:
+                gnode.node_tree = _ensure_grade_group(vfx)
+                gnode.label = "MASTER GRADE"
+                gnode.location = (_PX_GRADE, _PY)
+                orig_in = current
+                img_in = None
+                for s in gnode.inputs:
+                    if s.type == 'RGBA':
+                        img_in = s
+                        break
+                if img_in is not None:
+                    for l in list(img_in.links):
+                        nt.links.remove(l)
+                    nt.links.new(orig_in, img_in)
+                for name, val in (("Brightness", vfx.grade_brightness),
+                                  ("Contrast", vfx.grade_contrast),
+                                  ("Saturation", vfx.grade_saturation)):
+                    s = gnode.inputs.get(name)
+                    if s is not None:
+                        try:
+                            s.default_value = val
+                        except Exception:
+                            pass
+                graded = None
+                for s in gnode.outputs:
+                    if s.type == 'RGBA':
+                        graded = s
+                        break
+                if graded is None:
+                    graded = orig_in
+                msock = build_mask(
+                    nt, vfx, "GRADE", getattr(vfx, "grade_mask_source", 'NONE'),
+                    vfx.grade_mask_invert, vfx.grade_mask_soft,
+                    vfx.grade_mask_depth_start, vfx.grade_mask_depth_end,
+                    vfx.grade_mask_luma_lo, vfx.grade_mask_luma_hi,
+                    ext_node=vfx.grade_mask_ext_node, image_sock=orig_in)
+                current = _apply_mask(nt, "GRADE", orig_in, graded, msock, _PY - 250)
+                if msock is not None and getattr(vfx, "use_mask", False) and getattr(vfx, "mask_source", 'NONE') == 'GRADE':
+                    view_sock = msock
+        except Exception as e:
+            print("VFX master grade error:", e)
+    else:
+        _remove_nodes(nt, "VFX_GRADE_MASTER")
+
     # Light Groups: combine LG outputs
     if getattr(vfx, "use_light_groups", False):
         try:
@@ -963,13 +1520,7 @@ def build_comp_assembly(vfx, master, nt=None):
         except Exception as e:
             print("VFX light groups error:", e)
 
-    # Cryptomatte: add crypto nodes
-    if getattr(vfx, "use_cryptomatte", False):
-        try:
-            setup_cryptomatte_for_layers(vfx, master)
-            add_cryptomatte_nodes(vfx, master, nt)
-        except Exception as e:
-            print("VFX cryptomatte error:", e)
+    # Cryptomatte: feature removed
 
     # Color Match: plate matching node group
     if getattr(vfx, "use_color_match", False):
@@ -981,6 +1532,9 @@ def build_comp_assembly(vfx, master, nt=None):
                 apply_preset(cm_ng, preset, strength)
 
             cm_node = nt.nodes.get("VFX_COLORMATCH")
+            if cm_node is not None and cm_node.type != 'GROUP':
+                nt.nodes.remove(cm_node)
+                cm_node = None
             if cm_node is None:
                 for bid in ("CompositorNodeGroup", "ShaderNodeGroup", "NodeGroup"):
                     try:
@@ -994,7 +1548,7 @@ def build_comp_assembly(vfx, master, nt=None):
                     cm_node["vfx_colormatch"] = 1
             if cm_node is not None:
                 cm_node.node_tree = cm_ng
-                cm_node.location = (_PX_OUT - 300, _PY - 100)
+                cm_node.location = (_PX_GRADE - 300, _PY - 100)
                 img_in = None
                 for s in cm_node.inputs:
                     if s.type == 'RGBA':
@@ -1054,6 +1608,62 @@ def build_comp_assembly(vfx, master, nt=None):
             vsock = node.inputs.get("Image") or node.inputs[0]
             nt.links.new(view_sock, vsock)
             break
+    try:
+        _self_check_masks(nt, vfx)
+    except Exception:
+        pass
+
+
+def _self_check_masks(nt, vfx):
+    """Post-build self-check (printed to console):
+    every masked effect has Mix(fac=mask), no MASK_* node hangs in the air."""
+    problems = []
+    lines = ["VFX self-check:"]
+    for prefix, on, src in (("DOF", getattr(vfx, "use_dof", False), getattr(vfx, "dof_mask_source", 'NONE')),
+                            ("GLARE", getattr(vfx, "use_glare", False), getattr(vfx, "glare_mask_source", 'NONE')),
+                            ("GRADE", getattr(vfx, "use_master_grade", False), getattr(vfx, "grade_mask_source", 'NONE'))):
+        if not on:
+            continue
+        node = nt.nodes.get(f"VFX_MASKMIX_{prefix}")
+        if src == 'NONE':
+            ok = node is None
+            lines.append(f"  {prefix}: no mask (ok={ok})")
+            if not ok:
+                problems.append(f"{prefix}: mask source NONE but VFX_MASKMIX_{prefix} still present")
+        else:
+            ok = node is not None and node.inputs[0].is_linked
+            lines.append(f"  {prefix}: Mix(fac=MASK) linked={ok}")
+            if not ok:
+                problems.append(f"{prefix}: mask mix missing or unlinked")
+    if getattr(vfx, "use_fog", False) and getattr(vfx, "fog_mask_source", 'NONE') != 'NONE':
+        fg = nt.nodes.get("VFX_FOG_GROUP")
+        em = fg.inputs.get("Extra Mask") if fg is not None else None
+        ok = em is not None and em.is_linked
+        lines.append(f"  FOG: Extra Mask linked={ok}")
+        if not ok:
+            problems.append("FOG: Extra Mask input unlinked")
+    for layer in getattr(vfx, "layers", []):
+        if getattr(layer, "use_grade", False):
+            src = getattr(layer, "grade_mask_source", 'NONE')
+            use_am = getattr(layer, "use_alpha_mask", False)
+            if src == 'NONE' and not use_am:
+                continue
+            node = nt.nodes.get(f"VFX_MASKMIX_L{layer.id}")
+            ok = node is not None and node.inputs[0].is_linked
+            lines.append(f"  L{layer.layer_name}: grade mask Mix linked={ok}")
+            if not ok:
+                problems.append(f"layer {layer.layer_name}: grade mask mix missing/unlinked")
+    hanging = [n.name for n in nt.nodes
+               if n.name.startswith("MASK_") and n.outputs
+               and not any(o.is_linked for o in n.outputs)]
+    if hanging:
+        problems.append("hanging MASK nodes: " + ", ".join(hanging))
+    if problems:
+        for p in problems:
+            lines.append("  PROBLEM: " + p)
+    else:
+        lines.append("  all mask chains OK")
+    print("\n".join(lines))
 
 
 def _update_mist(context):
