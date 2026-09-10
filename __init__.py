@@ -389,6 +389,34 @@ class VFXProject(bpy.types.PropertyGroup):
         description="Object picked with the Cryptomatte pipette",
         default=""
     )
+    use_color_match: BoolProperty(
+        name="Color Match / Plate",
+        description="Match colors to a reference plate (presets)",
+        default=False,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    color_match_preset: EnumProperty(
+        name="Preset",
+        items=(
+            ('NONE', "None", "No color matching"),
+            ('WARM', "Warm", "Warm golden tint"),
+            ('TEAL_ORANGE', "Teal & Orange", "Cinematic teal/orange"),
+            ('COOL', "Cool", "Cool blue tint"),
+            ('FILM', "Film", "Filmic contrast look"),
+        ),
+        default='NONE',
+        update=lambda s, c: _trigger_comp(c)
+    )
+    color_match_strength: FloatProperty(
+        name="Strength", default=1.0, min=0.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    use_light_groups: BoolProperty(
+        name="Light Groups",
+        description="Auto-assign lights into Key/Fill/Rim/Env groups",
+        default=False,
+        update=lambda s, c: _trigger_comp(c)
+    )
     mask_source: EnumProperty(
         name="Mask Source",
         items=(
@@ -492,6 +520,11 @@ class VFXProject(bpy.types.PropertyGroup):
     )
     dof_fstop: FloatProperty(
         name="F-Stop", default=2.8, min=0.1, max=32.0,
+        update=lambda s, c: _dof_changed(c)
+    )
+    dof_maxblur: FloatProperty(
+        name="Max Blur", default=0.5, min=0.0, max=1.0,
+        description="Maximum blur amount at Far End (0 = sharp)",
         update=lambda s, c: _dof_changed(c)
     )
     dof_focus: FloatProperty(
@@ -648,6 +681,8 @@ from .operators import (
     VFX_OT_diagnostic,
     VFX_OT_setup_light_groups, VFX_OT_apply_color_preset,
     VFX_OT_preview_this_mask, VFX_OT_pick_cryptomatte,
+    VFX_OT_reset_layer_grade, VFX_OT_reset_master_grade,
+    VFX_OT_copy_master_grade,
 )
 from .ui import (
     VFX_UL_layers, VFX_PT_main, VFX_PT_post_effects,
@@ -692,8 +727,7 @@ classes = (
     VFX_OT_refresh_proxies,
     VFX_OT_diagnostic,
     VFX_OT_apply_color_preset,
-    VFX_OT_enable_cryptomatte,
-    VFX_OT_disable_cryptomatte,
+    VFX_OT_preview_this_mask, VFX_OT_pick_cryptomatte,
     VFX_OT_reset_layer_grade,
     VFX_OT_reset_master_grade,
     VFX_OT_copy_master_grade,

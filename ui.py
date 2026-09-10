@@ -319,14 +319,27 @@ def _draw_advanced_features(context, layout):
     vfx, master = get_project(context, allow_write=False)
 
     # Color Match
-    box = layout.box()
-    bh = box.row(align=True)
+    cmbox = layout.box()
+    bh = cmbox.row(align=True)
     bh.prop(vfx, "use_color_match", text="")
     bh.label(text="COLOR MATCH / PLATE", icon='COLOR')
     if vfx.use_color_match:
         cmc = cmbox.column(align=True)
-        cmc.prop(vfx, "color_match_preset", text="")
-        cmc.prop(vfx, "color_match_strength")
+        cmc.prop(vfx, "color_match_preset", text="Preset")
+        cmc.prop(vfx, "color_match_strength", text="Strength")
+        crow = cmc.row(align=True)
+        for preset_id in ('WARM', 'TEAL_ORANGE', 'COOL', 'FILM'):
+            op = crow.operator("vfx.apply_color_preset", text=preset_id.replace('_', ' ').title())
+            op.preset = preset_id
+
+    # Light Groups
+    box = layout.box()
+    bh = box.row(align=True)
+    bh.prop(vfx, "use_light_groups", text="")
+    bh.label(text="LIGHT GROUPS", icon='LIGHT')
+    if vfx.use_light_groups:
+        box.operator("vfx.setup_light_groups", icon='LIGHT')
+        box.label(text="Auto-assigns Key/Fill/Rim/Env", icon='INFO')
 
 
 def _draw_render_settings(context, layout):

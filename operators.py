@@ -1076,36 +1076,6 @@ class VFX_OT_apply_color_preset(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class VFX_OT_enable_cryptomatte(bpy.types.Operator):
-    bl_idname = "vfx.enable_cryptomatte"
-    bl_label = "Enable Cryptomatte"
-    bl_description = "Enable Cryptomatte Object + Material passes on all scenes"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        from .cryptomatte import setup_cryptomatte_for_layers
-        vfx, master = get_project(context, allow_write=True)
-        setup_cryptomatte_for_layers(vfx, master)
-        vfx.use_cryptomatte = True
-        rebuild_comp(vfx, master)
-        self.report({'INFO'}, "Cryptomatte passes enabled")
-        return {'FINISHED'}
-
-
-class VFX_OT_disable_cryptomatte(bpy.types.Operator):
-    bl_idname = "vfx.disable_cryptomatte"
-    bl_label = "Disable Cryptomatte"
-    bl_description = "Disable Cryptomatte passes"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        vfx, master = get_project(context, allow_write=True)
-        vfx.use_cryptomatte = False
-        rebuild_comp(vfx, master)
-        self.report({'INFO'}, "Cryptomatte disabled")
-        return {'FINISHED'}
-
-
 class VFX_OT_reset_layer_grade(bpy.types.Operator):
     bl_idname = "vfx.reset_layer_grade"
     bl_label = "Reset Layer Grade"
