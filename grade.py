@@ -369,7 +369,10 @@ def _create_grade_node(nt, name, label, location):
 
 
 def ensure_layer_grades(vfx, master, nt):
-    """Create per-layer grade nodes. Returns dict {layer_id: grade_node}."""
+    """Create per-layer grade nodes. Returns dict {layer_id: grade_node}.
+    Each grade is wrapped with the MASK scheme: out = Mix(fac=MASK, A=orig, B=graded).
+    Default mask = layer alpha (silhouette) when use_alpha_mask is on."""
+    from .compositor import build_mask, _apply_mask
     grades = {}
     x = 200
     for layer in vfx.layers:
@@ -386,7 +389,43 @@ def ensure_layer_grades(vfx, master, nt):
         )
         if gn:
             apply_grade_values(gn, layer, 'l_')
-            grades[layer.id] = gn
+            ln = nt.nodes.get(f"VFX_RL_{layer.id}")
+            orig_sock = ln.outputs.get("Image") if ln and ln.outputs.get("Image") else None
+            graded_sock = gn.outputs.get("Image")
+            out_sock = orig_sock
+            if orig_sock is not None and graded_sock is not None:
+                # feed the layer image into the grade node
+                g_in = None
+                for s in gn.inputs:
+                    if s.type == 'RGBA' and s.name == "Image":
+                        g_in = s
+                        break
+                if g_in is None:
+                    for s in gn.inputs:
+                        if s.type == 'RGBA':
+                            g_in = s
+                            break
+                if g_in is not None:
+                    for l in list(g_in.links):
+                        nt.links.remove(l)
+                    nt.links.new(orig_sock, g_in)
+                # mask wrap (default: alpha silhouette)
+                use_am = getattr(layer, 'use_alpha_mask', False)
+                src = getattr(layer, 'grade_mask_source', 'NONE')
+                mask_src = 'ALPHA' if (use_am and src == 'NONE') else src
+                try:
+                    msock = build_mask(
+                        nt, vfx, f"L{layer.id}", mask_src,
+                        layer.grade_mask_invert, layer.grade_mask_soft,
+                        layer.grade_mask_depth_start, layer.grade_mask_depth_end,
+                        layer.grade_mask_luma_lo, layer.grade_mask_luma_hi,
+                        ext_node=layer.grade_mask_ext_node, image_sock=orig_sock)
+                    out = _apply_mask(nt, f"L{layer.id}", orig_sock, graded_sock, msock, -600)
+                    if out is not None:
+                        out_sock = out
+                except Exception as e:
+                    _log(f"layer grade mask error: {e}")
+            grades[layer.id] = out_sock
         x += 250
     return grades
 

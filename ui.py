@@ -138,31 +138,6 @@ def _draw_layer_list(context, layout):
 
         if vfx.use_fog:
             box.prop(layer, "fog_factor")
-        box.prop(layer, "use_grade")
-        if layer.use_grade:
-            lg = box.column(align=True)
-            lg.prop(layer, "grade_bright")
-            lg.prop(layer, "grade_contrast")
-            lg.prop(layer, "grade_sat")
-            row = lg.row(align=True)
-            row.prop(layer, "use_alpha_mask", icon='MOD_MASK')
-            if not layer.use_alpha_mask:
-                lg.prop(layer, "grade_mask_source", text="Mask")
-                if layer.grade_mask_source == 'DEPTH':
-                    lr = lg.row(align=True)
-                    lr.prop(layer, "grade_mask_depth_start")
-                    lr.prop(layer, "grade_mask_depth_end")
-                elif layer.grade_mask_source == 'LUMA':
-                    lr = lg.row(align=True)
-                    lr.prop(layer, "grade_mask_luma_lo")
-                    lr.prop(layer, "grade_mask_luma_hi")
-                elif layer.grade_mask_source == 'EXT':
-                    lg.prop(layer, "grade_mask_ext_node")
-                    pk = lg.operator("vfx.pick_cryptomatte", text="Pick Object (pipette)", icon='EYEDROPPER')
-                    pk.target = 'LAYER'
-                r3 = lg.row(align=True)
-                r3.prop(layer, "grade_mask_invert")
-                r3.prop(layer, "grade_mask_soft")
         box.separator()
         box.prop(layer, "use_adjust")
         if layer.use_adjust:
@@ -198,6 +173,26 @@ def _draw_layer_list(context, layout):
             row_lgg.prop(layer, "l_lift", text="Lift")
             row_lgg.prop(layer, "l_gain", text="Gain")
             gbox.operator("vfx.reset_layer_grade", icon='LOOP_BACK')
+            # MASK for per-layer grade (default: alpha silhouette)
+            lam = gc.row(align=True)
+            lam.prop(layer, "use_alpha_mask", icon='MOD_MASK')
+            if not layer.use_alpha_mask:
+                gc.prop(layer, "grade_mask_source", text="Mask")
+                if layer.grade_mask_source == 'DEPTH':
+                    lr = gc.row(align=True)
+                    lr.prop(layer, "grade_mask_depth_start")
+                    lr.prop(layer, "grade_mask_depth_end")
+                elif layer.grade_mask_source == 'LUMA':
+                    lr = gc.row(align=True)
+                    lr.prop(layer, "grade_mask_luma_lo")
+                    lr.prop(layer, "grade_mask_luma_hi")
+                elif layer.grade_mask_source == 'EXT':
+                    gc.prop(layer, "grade_mask_ext_node")
+                    pk = gc.operator("vfx.pick_cryptomatte", text="Pick Object (pipette)", icon='EYEDROPPER')
+                    pk.target = 'LAYER'
+                r3 = gc.row(align=True)
+                r3.prop(layer, "grade_mask_invert")
+                r3.prop(layer, "grade_mask_soft")
 
 
 def _draw_mask_section(context, layout, vfx, prefix, sources):
@@ -299,17 +294,6 @@ def _draw_post_effects(context, layout):
         lc = ldbox.column(align=True)
         lc.prop(vfx, "lensdist_distort")
         lc.prop(vfx, "lensdist_disperse")
-    gradebox = layout.box()
-    gw = gradebox.row(align=True)
-    gw.prop(vfx, "use_master_grade", text="")
-    gw.label(text="MASTER GRADE", icon='COLOR')
-    if vfx.use_master_grade:
-        gc2 = gradebox.column(align=True)
-        gc2.prop(vfx, "grade_brightness")
-        gc2.prop(vfx, "grade_contrast")
-        gc2.prop(vfx, "grade_saturation")
-        _draw_mask_section(context, gc2, vfx, "grade", ('ALPHA', 'DEPTH', 'LUMA', 'EXT'))
-
     # ── MASTER GRADE (primary correction, applied first in chain) ──
     mgbox = layout.box()
     mgr = mgbox.row(align=True)
@@ -328,6 +312,7 @@ def _draw_post_effects(context, layout):
         row_btn = mgbox.row(align=True)
         row_btn.operator("vfx.reset_master_grade", icon='LOOP_BACK')
         row_btn.operator("vfx.copy_master_grade", icon='COPYDOWN')
+        _draw_mask_section(context, mgc, vfx, "grade", ('ALPHA', 'DEPTH', 'LUMA', 'EXT'))
 
 def _draw_advanced_features(context, layout):
     """Draw advanced features: Color Match, Light Groups."""

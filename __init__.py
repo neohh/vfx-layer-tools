@@ -8,7 +8,7 @@ bl_info = {
     "category": "Compositing",
 }
 
-VFX_VERSION = "2.5.0"
+VFX_VERSION = "3.1.0"
 
 import bpy
 import importlib
@@ -176,24 +176,6 @@ class VFXLayer(bpy.types.PropertyGroup):
     fog_factor: FloatProperty(
         name="Fog x(layer)", default=1.0, min=0.0, max=2.0,
         description="Per-layer multiplier: 0 = off, 1 = normal, 2 = double",
-        update=lambda self, ctx: _trigger_comp(ctx)
-    )
-    use_grade: BoolProperty(
-        name="Grade (comp)",
-        description="Per-layer color grade in the compositor",
-        default=False,
-        update=lambda self, ctx: _trigger_comp(ctx)
-    )
-    grade_bright: FloatProperty(
-        name="Brightness", default=0.0, min=-1.0, max=1.0,
-        update=lambda self, ctx: _trigger_comp(ctx)
-    )
-    grade_contrast: FloatProperty(
-        name="Contrast", default=0.0, min=-1.0, max=1.0,
-        update=lambda self, ctx: _trigger_comp(ctx)
-    )
-    grade_sat: FloatProperty(
-        name="Saturation", default=1.0, min=0.0, max=2.0,
         update=lambda self, ctx: _trigger_comp(ctx)
     )
     use_alpha_mask: BoolProperty(
@@ -563,24 +545,6 @@ class VFXProject(bpy.types.PropertyGroup):
     )
     lensdist_disperse: FloatProperty(
         name="Disperse", default=0.0, min=0.0, max=1.0,
-        update=lambda s, c: _trigger_comp(c)
-    )
-    use_master_grade: BoolProperty(
-        name="Master Grade",
-        description="Final color grade over the whole comp (masked)",
-        default=False,
-        update=lambda s, c: _trigger_comp(c)
-    )
-    grade_brightness: FloatProperty(
-        name="Brightness", default=0.0, min=-1.0, max=1.0,
-        update=lambda s, c: _trigger_comp(c)
-    )
-    grade_contrast: FloatProperty(
-        name="Contrast", default=0.0, min=-1.0, max=1.0,
-        update=lambda s, c: _trigger_comp(c)
-    )
-    grade_saturation: FloatProperty(
-        name="Saturation", default=1.0, min=0.0, max=2.0,
         update=lambda s, c: _trigger_comp(c)
     )
     grade_mask_source: EnumProperty(

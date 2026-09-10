@@ -9,6 +9,7 @@ from .core import (
 )
 from .materials import _trigger_comp
 from .colormatch import get_or_create_color_match_group, apply_preset
+from .grade import ensure_layer_grades, ensure_master_grade, apply_grade_values
 from .lightgroups import add_light_group_output_nodes
 
 
@@ -1198,9 +1199,7 @@ def build_comp_assembly(vfx, master, nt=None):
     _cleanup_mask_nodes(nt)
     _remove_vfx_nodes(nt, "VFX_BLUR", "VFX_BLURRAMP", "VFX_BLURMATH")
     for node in list(nt.nodes):
-        if node.name.startswith("VFX_GRADE_L"):
-            nt.nodes.remove(node)
-        elif node.type == 'CRYPTOMATTE' and node.name != "VFX_CRYPTO_PICK":
+        if node.type == 'CRYPTOMATTE' and node.name != "VFX_CRYPTO_PICK":
             nt.nodes.remove(node)
     sockets = []
     for layer in reversed(vfx.layers):
@@ -1219,59 +1218,6 @@ def build_comp_assembly(vfx, master, nt=None):
             ob = nt.nodes.get(f"VFX_RL_{layer.id}")
             if ob and ob.outputs.get("Image"):
                 ob_sock = ob.outputs["Image"]
-        if getattr(layer, "use_grade", False) and ob_sock is not None:
-            try:
-                gnode_l = nt.nodes.get(f"VFX_GRADE_L{layer.id}")
-                if gnode_l is not None and gnode_l.type != 'GROUP':
-                    nt.nodes.remove(gnode_l)
-                    gnode_l = None
-                if gnode_l is None:
-                    for bid in ("CompositorNodeGroup", "ShaderNodeGroup", "NodeGroup"):
-                        try:
-                            gnode_l = nt.nodes.new(bid)
-                            break
-                        except Exception:
-                            continue
-                    if gnode_l is not None:
-                        gnode_l.name = f"VFX_GRADE_L{layer.id}"
-                if gnode_l is not None:
-                    gnode_l.node_tree = _ensure_grade_group(vfx, f"VFX_LayerGrade_{layer.id}")
-                    gnode_l.label = f"GRADE {layer.layer_name}"
-                    gnode_l.location = (-200, -900)
-                    ii = None
-                    for s in gnode_l.inputs:
-                        if s.type == 'RGBA':
-                            ii = s
-                            break
-                    if ii is not None:
-                        for l in list(ii.links):
-                            nt.links.remove(l)
-                        nt.links.new(ob_sock, ii)
-                    for name, val in (("Brightness", layer.grade_bright),
-                                      ("Contrast", layer.grade_contrast),
-                                      ("Saturation", layer.grade_sat)):
-                        s = gnode_l.inputs.get(name)
-                        if s is not None:
-                            try:
-                                s.default_value = val
-                            except Exception:
-                                pass
-                    gs = None
-                    for s in gnode_l.outputs:
-                        if s.type == 'RGBA':
-                            gs = s
-                            break
-                    if gs is not None:
-                        src = 'ALPHA' if (getattr(layer, "use_alpha_mask", False) and getattr(layer, "grade_mask_source", 'NONE') == 'NONE') else getattr(layer, "grade_mask_source", 'NONE')
-                        msock = build_mask(
-                            nt, vfx, f"L{layer.id}", src,
-                            layer.grade_mask_invert, layer.grade_mask_soft,
-                            layer.grade_mask_depth_start, layer.grade_mask_depth_end,
-                            layer.grade_mask_luma_lo, layer.grade_mask_luma_hi,
-                            ext_node=layer.grade_mask_ext_node, image_sock=ob_sock)
-                        ob_sock = _apply_mask(nt, f"L{layer.id}", ob_sock, gs, msock)
-            except Exception as e:
-                print("VFX layer grade error:", e)
         if getattr(layer, "shadow_mode", "CAST") == 'RECEIVE':
             if ob_sock:
                 sockets.append((layer, "OBJ", ob_sock))
@@ -1376,16 +1322,8 @@ def build_comp_assembly(vfx, master, nt=None):
                     lid = entry["id"]
                     lay = entry["layer"]
                     ln = nt.nodes.get(f"VFX_RL_{lid}")
-                    grade_n = grade_nodes.get(lid)
-                    if grade_n is not None:
-                        src_sock = grade_n.outputs.get("Image")
-                        if ln and ln.outputs.get("Image"):
-                            grade_in = grade_n.inputs.get("Image")
-                            if grade_in is not None:
-                                for l in list(grade_in.links):
-                                    nt.links.remove(l)
-                                nt.links.new(ln.outputs["Image"], grade_in)
-                    else:
+                    src_sock = grade_nodes.get(lid)
+                    if src_sock is None:
                         src_sock = ln.outputs.get("Image") if ln else None
                     s = gi(f"OBJ_{lid}")
                     if s is not None and src_sock is not None:
@@ -1419,24 +1357,12 @@ def build_comp_assembly(vfx, master, nt=None):
             print("VFX fog apply error:", e)
             traceback.print_exc()
 
-    # без тумана
+    # без тумана (grades already fed and masked inside ensure_layer_grades)
     if not fog_done:
-        for layer_id, grade_n in grade_nodes.items():
-            ln = nt.nodes.get(f"VFX_RL_{layer_id}")
-            if ln and ln.outputs.get("Image"):
-                grade_in = grade_n.inputs.get("Image")
-                if grade_in is not None:
-                    for l in list(grade_in.links):
-                        nt.links.remove(l)
-                    nt.links.new(ln.outputs["Image"], grade_in)
-
         graded_sockets = []
         for layer, kind, sock in sockets:
-            grade_n = grade_nodes.get(layer.id) if kind == 'OBJ' else None
-            if grade_n is not None and grade_n.outputs.get("Image"):
-                graded_sockets.append((layer, kind, grade_n.outputs["Image"]))
-            else:
-                graded_sockets.append((layer, kind, sock))
+            gsock = grade_nodes.get(layer.id) if kind == 'OBJ' else None
+            graded_sockets.append((layer, kind, gsock if gsock is not None else sock))
         if bg_sock is not None:
             current = bg_sock
             mix_list = graded_sockets
@@ -1664,45 +1590,29 @@ def build_comp_assembly(vfx, master, nt=None):
 
     # -------------------------------------------------------------
     # MASTER GRADE: final color grade over the whole comp + mask
+    # Uses the VFX_Grade engine (grade.py): m_exposure/temp/lift/gain/...
     # -------------------------------------------------------------
-    if getattr(vfx, "use_master_grade", False):
+    if getattr(vfx, "m_grade_enable", False):
         try:
-            gnode = nt.nodes.get("VFX_GRADE_MASTER")
-            if gnode is not None and gnode.type != 'GROUP':
-                nt.nodes.remove(gnode)
-                gnode = None
-            if gnode is None:
-                for bid in ("CompositorNodeGroup", "ShaderNodeGroup", "NodeGroup"):
-                    try:
-                        gnode = nt.nodes.new(bid)
-                        break
-                    except Exception:
-                        continue
-                if gnode is not None:
-                    gnode.name = "VFX_GRADE_MASTER"
+            gnode = ensure_master_grade(vfx, master, nt)
             if gnode is not None:
-                gnode.node_tree = _ensure_grade_group(vfx)
                 gnode.label = "MASTER GRADE"
                 gnode.location = (_PX_GRADE, _PY)
                 orig_in = current
                 img_in = None
                 for s in gnode.inputs:
-                    if s.type == 'RGBA':
+                    if s.type == 'RGBA' and s.name == "Image":
                         img_in = s
                         break
+                if img_in is None:
+                    for s in gnode.inputs:
+                        if s.type == 'RGBA':
+                            img_in = s
+                            break
                 if img_in is not None:
                     for l in list(img_in.links):
                         nt.links.remove(l)
                     nt.links.new(orig_in, img_in)
-                for name, val in (("Brightness", vfx.grade_brightness),
-                                  ("Contrast", vfx.grade_contrast),
-                                  ("Saturation", vfx.grade_saturation)):
-                    s = gnode.inputs.get(name)
-                    if s is not None:
-                        try:
-                            s.default_value = val
-                        except Exception:
-                            pass
                 graded = None
                 for s in gnode.outputs:
                     if s.type == 'RGBA':
@@ -1840,7 +1750,7 @@ def _self_check_masks(nt, vfx):
     lines = ["VFX self-check:"]
     for prefix, on, src in (("DOF", getattr(vfx, "use_dof", False), getattr(vfx, "dof_mask_source", 'NONE')),
                             ("GLARE", getattr(vfx, "use_glare", False), getattr(vfx, "glare_mask_source", 'NONE')),
-                            ("GRADE", getattr(vfx, "use_master_grade", False), getattr(vfx, "grade_mask_source", 'NONE'))):
+                            ("GRADE", getattr(vfx, "m_grade_enable", False), getattr(vfx, "grade_mask_source", 'NONE'))):
         if not on:
             continue
         node = nt.nodes.get(f"VFX_MASKMIX_{prefix}")
@@ -1862,7 +1772,7 @@ def _self_check_masks(nt, vfx):
         if not ok:
             problems.append("FOG: Extra Mask input unlinked")
     for layer in getattr(vfx, "layers", []):
-        if getattr(layer, "use_grade", False):
+        if getattr(layer, "grade_enable", False):
             src = getattr(layer, "grade_mask_source", 'NONE')
             use_am = getattr(layer, "use_alpha_mask", False)
             if src == 'NONE' and not use_am:
