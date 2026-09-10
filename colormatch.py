@@ -1,7 +1,19 @@
 """VFX Layer Tools — Color correction / plate matching (Blender 5.2 safe)."""
 
 import bpy
+import traceback
 
+
+# ---------------------------------------------------------------------
+# NEUTRAL values (passthrough)
+# ---------------------------------------------------------------------
+NEUTRAL = {
+    'lift': (0.0, 0.0, 0.0),
+    'gamma': (1.0, 1.0, 1.0),
+    'gain': (1.0, 1.0, 1.0),
+    'hue': 0.5,
+    'saturation': 1.0,
+}
 
 # ---------------------------------------------------------------------
 # PRESETS: (lift, gamma, gain) RGB tuples + hue/sat adjustments
@@ -11,7 +23,7 @@ PRESETS = {
     'NONE': {
         'label': 'Off',
         'lift': (0.0, 0.0, 0.0),
-        'gamma': (0.5, 0.5, 0.5),
+        'gamma': (1.0, 1.0, 1.0),
         'gain': (1.0, 1.0, 1.0),
         'hue': 0.5,
         'saturation': 1.0,
@@ -138,8 +150,8 @@ def get_or_create_color_match_group():
     gout = ng.nodes.new("NodeGroupOutput")
     gout.location = (450, 0)
     img_in = gin.outputs.get("Image")
-    str_in = gin.outputs.get("Strength")
     img_out = gout.inputs.get("Image")
+    link_count = 0
 
     cur = img_in
 
@@ -189,11 +201,81 @@ def get_or_create_color_match_group():
     return ng
 
 
-def apply_preset(ng, preset_name, strength=1.0):
-    """Apply a color correction preset to the VFX_ColorMatch group."""
-    preset = PRESETS.get(preset_name)
-    if preset is None or preset_name == 'NONE':
+def _validate_group(ng):
+    """Check that the node group has the required internal nodes and links."""
+    required = {"VFX_CB", "VFX_HS"}
+    present = {n.name for n in ng.nodes}
+    if not required.issubset(present):
+        _log(f"Validation FAIL: missing nodes {required - present}")
+        return False
+    if len(ng.links) < 2:
+        _log(f"Validation FAIL: only {len(ng.links)} links (need >=2)")
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------
+# Socket finders — name-first, type-agnostic
+# ---------------------------------------------------------------------
+
+def _find_input_by_name_only(node, name):
+    """Find input socket by name only, ignoring type."""
+    if node is None:
+        return None
+    for s in node.inputs:
+        if s.name == name:
+            return s
+    name_lower = name.lower()
+    for s in node.inputs:
+        if s.name.lower() == name_lower:
+            return s
+    return None
+
+
+def _find_output_by_name_only(node, name):
+    """Find output socket by name only, ignoring type."""
+    if node is None:
+        return None
+    for s in node.outputs:
+        if s.name == name:
+            return s
+    name_lower = name.lower()
+    for s in node.outputs:
+        if s.name.lower() == name_lower:
+            return s
+    return None
+
+
+def _dump_sockets(node, label=""):
+    """Print all sockets on a node for debugging."""
+    if node is None:
+        _log(f"{label}: node is None")
         return
+    parts = [f"{label} ({node.bl_idname})"]
+    for s in node.inputs:
+        parts.append(f"  IN: {s.name!r} type={s.type!r}")
+    for s in node.outputs:
+        parts.append(f"  OUT: {s.name!r} type={s.type!r}")
+    _log("\n".join(parts))
+
+
+# ---------------------------------------------------------------------
+# PRESET APPLICATION — strength baked into values (no Mix node)
+# ---------------------------------------------------------------------
+
+def apply_preset(ng, preset_name, strength=1.0):
+    """Apply a color correction preset to the VFX_ColorMatch group.
+
+    Strength blends preset values toward neutral:
+      strength=0 → neutral (passthrough)
+      strength=1 → full preset
+    """
+    preset = PRESETS.get(preset_name)
+    if preset is None:
+        _log(f"apply_preset: unknown preset '{preset_name}'")
+        return
+
+    _log(f"apply_preset: {preset_name} strength={strength}")
 
     cb = ng.nodes.get("VFX_CB")
     if cb is not None:
@@ -209,17 +291,22 @@ def apply_preset(ng, preset_name, strength=1.0):
 
     hs = ng.nodes.get("VFX_HS")
     if hs is not None:
+        hue = _lerp(NEUTRAL['hue'], preset.get('hue', 0.5), strength)
+        sat = _lerp(NEUTRAL['saturation'], preset.get('saturation', 1.0), strength)
         for s in hs.inputs:
             if s.name.lower() == 'hue':
                 try:
-                    s.default_value = preset.get('hue', 0.5)
+                    s.default_value = hue
                 except Exception:
                     pass
             if s.name.lower() == 'saturation':
                 try:
-                    s.default_value = preset.get('saturation', 1.0)
+                    s.default_value = sat
                 except Exception:
                     pass
+        _log(f"  HS hue={hue} sat={sat}")
+    else:
+        _log("WARN: VFX_HS not found in group")
 
     mix = ng.nodes.get("VFX_STRENGTH_MIX")
     if mix is not None:

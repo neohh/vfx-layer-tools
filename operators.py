@@ -1067,3 +1067,98 @@ class VFX_OT_apply_color_preset(bpy.types.Operator):
         _trigger_comp(context)
         self.report({'INFO'}, f"Color preset: {self.preset}")
         return {'FINISHED'}
+
+
+class VFX_OT_enable_cryptomatte(bpy.types.Operator):
+    bl_idname = "vfx.enable_cryptomatte"
+    bl_label = "Enable Cryptomatte"
+    bl_description = "Enable Cryptomatte Object + Material passes on all scenes"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        from .cryptomatte import setup_cryptomatte_for_layers
+        vfx, master = get_project(context, allow_write=True)
+        setup_cryptomatte_for_layers(vfx, master)
+        vfx.use_cryptomatte = True
+        rebuild_comp(vfx, master)
+        self.report({'INFO'}, "Cryptomatte passes enabled")
+        return {'FINISHED'}
+
+
+class VFX_OT_disable_cryptomatte(bpy.types.Operator):
+    bl_idname = "vfx.disable_cryptomatte"
+    bl_label = "Disable Cryptomatte"
+    bl_description = "Disable Cryptomatte passes"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=True)
+        vfx.use_cryptomatte = False
+        rebuild_comp(vfx, master)
+        self.report({'INFO'}, "Cryptomatte disabled")
+        return {'FINISHED'}
+
+
+class VFX_OT_reset_layer_grade(bpy.types.Operator):
+    bl_idname = "vfx.reset_layer_grade"
+    bl_label = "Reset Layer Grade"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=True)
+        layer = active_layer(vfx)
+        if not layer:
+            self.report({'ERROR'}, "No active layer")
+            return {'CANCELLED'}
+        layer.l_exposure = 0.0
+        layer.l_temp = 0.0
+        layer.l_tint = 0.0
+        layer.l_lift = (0.0, 0.0, 0.0)
+        layer.l_gain = (1.0, 1.0, 1.0)
+        layer.l_sat = 1.0
+        layer.l_contrast = 1.0
+        rebuild_comp(vfx, master)
+        self.report({'INFO'}, "Layer grade reset")
+        return {'FINISHED'}
+
+
+class VFX_OT_reset_master_grade(bpy.types.Operator):
+    bl_idname = "vfx.reset_master_grade"
+    bl_label = "Reset Master Grade"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=True)
+        vfx.m_exposure = 0.0
+        vfx.m_temp = 0.0
+        vfx.m_tint = 0.0
+        vfx.m_lift = (0.0, 0.0, 0.0)
+        vfx.m_gain = (1.0, 1.0, 1.0)
+        vfx.m_saturation = 1.0
+        vfx.m_contrast = 1.0
+        rebuild_comp(vfx, master)
+        self.report({'INFO'}, "Master grade reset")
+        return {'FINISHED'}
+
+
+class VFX_OT_copy_master_grade(bpy.types.Operator):
+    bl_idname = "vfx.copy_master_grade"
+    bl_label = "Copy Master Grade to All Layers"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=True)
+        for layer in vfx.layers:
+            if not layer.enabled:
+                continue
+            layer.grade_enable = True
+            layer.l_exposure = vfx.m_exposure
+            layer.l_temp = vfx.m_temp
+            layer.l_tint = vfx.m_tint
+            layer.l_lift = vfx.m_lift[:]
+            layer.l_gain = vfx.m_gain[:]
+            layer.l_sat = vfx.m_saturation
+            layer.l_contrast = vfx.m_contrast
+        rebuild_comp(vfx, master)
+        self.report({'INFO'}, f"Copied master grade to {len(vfx.layers)} layers")
+        return {'FINISHED'}

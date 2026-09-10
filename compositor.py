@@ -12,11 +12,16 @@ from .colormatch import get_or_create_color_match_group, apply_preset
 from .lightgroups import add_light_group_output_nodes
 
 
+# ---------------------------------------------------------------------
+# COMP TREE
+# ---------------------------------------------------------------------
+
 def _find_comp_tree_attr(master):
     for attr in ("node_tree", "compositor_node_tree", "compositing_node_tree"):
         tree = getattr(master, attr, None)
         if tree is not None:
             return tree
+
     for attr in dir(master):
         low = attr.lower()
         if "node" in low or "comp" in low:
@@ -26,6 +31,7 @@ def _find_comp_tree_attr(master):
                 continue
             if isinstance(val, bpy.types.NodeTree):
                 return val
+
     return None
 
 
@@ -33,6 +39,7 @@ def get_comp_tree(master, create=True):
     tree = _find_comp_tree_attr(master)
     if tree is not None:
         return tree
+
     if hasattr(master, "use_nodes"):
         try:
             master.use_nodes = True
@@ -41,19 +48,28 @@ def get_comp_tree(master, create=True):
         tree = _find_comp_tree_attr(master)
         if tree is not None:
             return tree
+
     if not create:
         return None
+
+    # FALLBACK: search node_groups, but skip VFX sub-groups
+    # (VFX_FogGroup, VFX_Grade, VFX_ColorMatchGroup are CompositorNodeTree
+    # but NOT the scene's compositor)
     tree = None
     for ng in bpy.data.node_groups:
         if ng.bl_idname == 'CompositorNodeTree':
+            if ng.name.startswith("VFX_") and ng.name != "VFX_Compositor":
+                continue
             tree = ng
             break
+
     if tree is None:
         try:
             tree = bpy.data.node_groups.new(name="VFX_Compositor", type='CompositorNodeTree')
         except Exception:
             print("VFX: cannot create CompositorNodeTree")
             return None
+
     for attr in ("node_tree", "compositor_node_tree", "compositing_node_tree"):
         if hasattr(master, attr):
             try:
@@ -61,6 +77,7 @@ def get_comp_tree(master, create=True):
                 return tree
             except Exception:
                 continue
+
     for attr in dir(master):
         low = attr.lower()
         if "node" in low or "comp" in low:
@@ -70,14 +87,22 @@ def get_comp_tree(master, create=True):
                     return tree
             except Exception:
                 continue
+
     print("VFX: warning - compositor tree not attached, using detached tree")
     return tree
 
 
+
+# ---------------------------------------------------------------------
+# COMP FROM FILES
+# ---------------------------------------------------------------------
+
 def _load_sequence_image(scene_name, base_path):
+    """Fallback: load EXR sequence via image.load + SEQUENCE source."""
     img_name = f"VFX_SEQ_{scene_name}"
     abs_base = bpy.path.abspath(base_path)
     folder = os.path.join(abs_base, scene_name)
+
     existing = bpy.data.images.get(img_name)
     if existing is not None:
         if os.path.isdir(folder):
@@ -91,16 +116,21 @@ def _load_sequence_image(scene_name, base_path):
                 except Exception:
                     pass
         return existing
+
     if not os.path.isdir(folder):
         return None
+
     files = sorted([f for f in os.listdir(folder) if f.lower().endswith('.exr')])
     if not files:
         return None
+
     first_file = os.path.join(folder, files[0])
     try:
         img = bpy.data.images.load(first_file, check_existing=False)
-    except Exception:
+    except Exception as e:
+        print(f"VFX: load failed {first_file}: {e}")
         return None
+
     start_frame = 1
     try:
         digits = "".join(ch for ch in files[0] if ch.isdigit())
@@ -108,6 +138,7 @@ def _load_sequence_image(scene_name, base_path):
             start_frame = int(digits)
     except Exception:
         pass
+
     img.name = img_name
     img.source = 'SEQUENCE'
     try:
@@ -119,22 +150,28 @@ def _load_sequence_image(scene_name, base_path):
         img.reload()
     except Exception:
         pass
+
     return img
 
 
 def _load_sequence_image2(scene_name, base_path):
+    """Primary: load EXR sequence via ops.image.open for proper multi-file import."""
     img_name = f"VFX_SEQ_{scene_name}"
     abs_base = bpy.path.abspath(base_path)
     folder = os.path.join(abs_base, scene_name)
+
     files = []
     if os.path.isdir(folder):
-        files = sorted([f for f in os.listdir(folder) if f.lower().endswith('.exr')])
+        files = sorted([f for f in os.listdir(folder)
+                        if f.lower().endswith('.exr')])
     if not files:
         return _load_sequence_image(scene_name, base_path)
+
     start_frame = 1
     digits = "".join(ch for ch in files[0] if ch.isdigit())
     if digits:
         start_frame = int(digits)
+
     existing = bpy.data.images.get(img_name)
     if existing is not None:
         if getattr(existing, "frame_duration", 1) >= len(files):
@@ -147,9 +184,11 @@ def _load_sequence_image2(scene_name, base_path):
             bpy.data.images.remove(existing)
         except Exception:
             pass
+
     win = None
     if bpy.context.window_manager.windows:
         win = bpy.context.window_manager.windows[0]
+
     before = set(bpy.data.images.keys())
     try:
         with bpy.context.temp_override(window=win):
@@ -159,11 +198,15 @@ def _load_sequence_image2(scene_name, base_path):
                 check_existing=False,
                 relative_path=False,
             )
-    except Exception:
+    except Exception as e:
+        print("VFX SEQ2: ops open failed:", e)
         return _load_sequence_image(scene_name, base_path)
-    new_imgs = [bpy.data.images[k] for k in (set(bpy.data.images.keys()) - before)]
+
+    new_imgs = [bpy.data.images[k]
+                for k in (set(bpy.data.images.keys()) - before)]
     if not new_imgs:
         return _load_sequence_image(scene_name, base_path)
+
     img = new_imgs[0]
     img.name = img_name
     try:
@@ -171,6 +214,7 @@ def _load_sequence_image2(scene_name, base_path):
         img.frame_offset = 0
     except Exception:
         pass
+
     return img
 
 
@@ -178,16 +222,21 @@ def rebuild_comp_from_files(vfx, master):
     nt = get_comp_tree(master)
     if not nt:
         return
+
     for node in list(nt.nodes):
-        if node.type == 'R_LAYERS' and node.get("vfx_id") and node.name != "VFX_RL_FOGMAP":
+        if node.type == 'R_LAYERS' and node.get("vfx_id") \
+                and node.name != "VFX_RL_FOGMAP":
             nt.nodes.remove(node)
+
     y = 0
     for layer in vfx.layers:
         if not layer.enabled:
             continue
+
         if layer.scene:
             node_name = f"VFX_RL_{layer.id}"
             img = _load_sequence_image2(layer.scene.name, vfx.output_dir)
+
             node = nt.nodes.get(node_name)
             if node is not None and node.type != 'IMAGE':
                 nt.nodes.remove(node)
@@ -201,9 +250,11 @@ def rebuild_comp_from_files(vfx, master):
             node["vfx_id"] = layer.id
             node["vfx_pass"] = "OBJECT"
             node.location = (0, y)
+
         if layer.shadow_scene:
             node_name = f"VFX_RL_{layer.id}_SHD"
             img = _load_sequence_image2(layer.shadow_scene.name, vfx.output_dir)
+
             node = nt.nodes.get(node_name)
             if node is not None and node.type != 'IMAGE':
                 nt.nodes.remove(node)
@@ -217,13 +268,16 @@ def rebuild_comp_from_files(vfx, master):
             node["vfx_id"] = layer.id
             node["vfx_pass"] = "SHADOW"
             node.location = (350, y)
+
         y -= 220
+
     valid_names = set()
     for layer in vfx.layers:
         if layer.enabled and layer.scene:
             valid_names.add(f"VFX_RL_{layer.id}")
         if layer.enabled and layer.shadow_scene:
             valid_names.add(f"VFX_RL_{layer.id}_SHD")
+
     bg_scene = getattr(vfx, "bg_scene", None)
     if bg_scene:
         valid_names.add("VFX_RL_BG")
@@ -265,10 +319,12 @@ def rebuild_comp_from_files(vfx, master):
             node["vfx_id"] = "FOGMAP"
             node["vfx_pass"] = "MIST"
             node.location = (-350, 600)
+
     for node in list(nt.nodes):
         if node.type == 'IMAGE' and node.name.startswith("VFX_RL_"):
             if node.name not in valid_names:
                 nt.nodes.remove(node)
+
     try:
         nt.update_tag()
     except Exception:
@@ -276,13 +332,21 @@ def rebuild_comp_from_files(vfx, master):
     for window in bpy.context.window_manager.windows:
         for area in window.screen.areas:
             area.tag_redraw()
+
     build_comp_assembly(vfx, master)
 
+
+
+
+# ---------------------------------------------------------------------
+# COMP NODES
+# ---------------------------------------------------------------------
 
 def remove_comp_node(master, node_name):
     nt = get_comp_tree(master, create=False)
     if not nt:
         return
+
     node = nt.nodes.get(node_name)
     if node:
         nt.nodes.remove(node)
@@ -292,21 +356,28 @@ def ensure_render_node(master, scene, node_name, label, layer_id, pass_type, x=0
     nt = get_comp_tree(master)
     if not nt:
         return None
+
     node = nt.nodes.get(node_name)
+
     if node is not None and node.type != 'R_LAYERS':
         nt.nodes.remove(node)
         node = None
+
     if not node:
         node = nt.nodes.new("CompositorNodeRLayers")
         node.name = node_name
+
     node.label = label
+
     if scene:
         node.scene = scene
         if scene.view_layers:
             node.layer = scene.view_layers[0].name
+
     node["vfx_id"] = layer_id
     node["vfx_pass"] = pass_type
     node.location = (x, y)
+
     return node
 
 
@@ -314,21 +385,33 @@ def rebuild_comp(vfx, master):
     if getattr(vfx, "comp_mode", 'LIVE') == 'FILES':
         rebuild_comp_from_files(vfx, master)
         return
+
     nt = get_comp_tree(master)
     if not nt:
         return
+
     valid_nodes = set()
     y = 0
+
     for i, layer in enumerate(vfx.layers):
         if layer.enabled and layer.scene:
             node_name = f"VFX_RL_{layer.id}"
             valid_nodes.add(node_name)
-            ensure_render_node(master, layer.scene, node_name, layer.layer_name, layer.id, "OBJECT", x=0, y=y)
+            ensure_render_node(
+                master, layer.scene, node_name, layer.layer_name,
+                layer.id, "OBJECT", x=0, y=y
+            )
+
         if layer.enabled and layer.shadow_scene:
             node_name = f"VFX_RL_{layer.id}_SHD"
             valid_nodes.add(node_name)
-            ensure_render_node(master, layer.shadow_scene, node_name, f"{layer.layer_name} SHD", layer.id, "SHADOW", x=350, y=y)
+            ensure_render_node(
+                master, layer.shadow_scene, node_name, f"{layer.layer_name} SHD",
+                layer.id, "SHADOW", x=350, y=y
+            )
+
         y -= 220
+
     bg_scene = getattr(vfx, "bg_scene", None)
     if bg_scene:
         valid_nodes.add("VFX_RL_BG")
@@ -338,13 +421,20 @@ def rebuild_comp(vfx, master):
         fm = getattr(vfx, "fog_map_scene", None)
         if fm is not None:
             valid_nodes.add("VFX_RL_FOGMAP")
-            ensure_render_node(master, fm, "VFX_RL_FOGMAP", "FOG MAP (live)", "FOGMAP", "MIST", x=-350, y=600)
+            ensure_render_node(
+                master, fm, "VFX_RL_FOGMAP", "FOG MAP (live)",
+                "FOGMAP", "MIST", x=-350, y=600
+            )
+
     for node in list(nt.nodes):
         if node.type == 'IMAGE' and node.get("vfx_id"):
             nt.nodes.remove(node)
+
     for node in list(nt.nodes):
-        if node.type == 'R_LAYERS' and node.get("vfx_id") and node.name not in valid_nodes:
+        if node.type == 'R_LAYERS' and node.get("vfx_id") \
+                and node.name not in valid_nodes:
             nt.nodes.remove(node)
+
     build_comp_assembly(vfx, master)
 
 
@@ -354,10 +444,12 @@ def _new_node(nt, *ids):
             return nt.nodes.new(i)
         except Exception:
             continue
+    print("VFX: no valid node type among", ids)
     return None
 
 
 def _safe_set(node, name, value):
+    """Set a property: try direct attr first, then input socket (case-insensitive)."""
     try:
         setattr(node, name, value)
         return True
@@ -821,7 +913,6 @@ def _set_glare_type(node, glare_type):
     The addon enum values: BLOOM, FOG_GLOW, STREAKS, GHOSTS
     Blender socket values: Bloom, Fog Glow, Streaks, Ghosts (display names)
     """
-    # Map addon enum -> Blender socket display name
     TYPE_MAP = {
         'BLOOM': 'Bloom',
         'FOG_GLOW': 'Fog Glow',
@@ -832,14 +923,12 @@ def _set_glare_type(node, glare_type):
 
     for sock in node.inputs:
         if sock.name == 'Type':
-            # Try display name first (e.g. "Bloom"), then raw value
             for val in (socket_name, glare_type, glare_type.lower()):
                 try:
                     sock.default_value = val
                     return True
                 except Exception:
                     pass
-            # Last resort: try all known variations
             for val in ('Bloom', 'Fog Glow', 'Streaks', 'Ghosts',
                         'BLOOM', 'FOG_GLOW', 'STREAKS', 'GHOSTS'):
                 try:
@@ -849,6 +938,46 @@ def _set_glare_type(node, glare_type):
                     pass
             break
     return False
+
+
+def _remove_nodes(nt, *names):
+    """Remove nodes by name if they exist."""
+    for n in names:
+        node = nt.nodes.get(n)
+        if node is not None:
+            nt.nodes.remove(node)
+
+
+def _get_mist_socket(nt):
+    n = nt.nodes.get("VFX_RL_FOGMAP")
+    if n is not None:
+        if n.outputs.get("Mist"):
+            return n.outputs["Mist"]
+        if n.outputs.get("Image"):
+            return n.outputs["Image"]
+    return None
+
+
+def _cleanup_fog_nodes(nt):
+    """Remove all VFX_FOG* nodes except VFX_FOG_GROUP."""
+    for node in list(nt.nodes):
+        n = node.name
+        if n == "VFX_FOG_GROUP":
+            continue
+        if n.startswith("VFX_FOG") or node.get("vfx_fog"):
+            nt.nodes.remove(node)
+
+
+def _ensure_fogmap(nt, vfx, master):
+    _setup_fog_passes(vfx, master, force=True)
+    fm = getattr(vfx, "fog_map_scene", None)
+    if fm is not None:
+        ensure_render_node(
+            master, fm, "VFX_RL_FOGMAP", "FOG MAP (live)",
+            "FOGMAP", "MIST", x=-350, y=600
+        )
+    return nt.nodes.get("VFX_RL_FOGMAP")
+
 
 def _fog_mix_node(ng, loc):
     mix = _new_node(ng, "CompositorNodeMixRGB", "ShaderNodeMix")
@@ -874,7 +1003,8 @@ def _fog_mix_node(ng, loc):
                 break
         return mix, fac_in, a_in, b_in, out_s
     return (mix, mix.inputs.get("Fac"), mix.inputs.get("Color1"),
-            mix.inputs.get("Color2"), mix.outputs[0] if len(mix.outputs) else None)
+            mix.inputs.get("Color2"),
+            mix.outputs[0] if len(mix.outputs) else None)
 
 
 def _build_fog_group2(vfx, has_bg=True):
@@ -889,6 +1019,7 @@ def _build_fog_group2(vfx, has_bg=True):
             ng.interface.clear()
         except Exception:
             pass
+
     ng.interface.new_socket("Mist", in_out='INPUT', socket_type='NodeSocketColor')
     ng.interface.new_socket("Strength", in_out='INPUT', socket_type='NodeSocketFloat')
     ng.interface.new_socket("Extra Mask", in_out='INPUT', socket_type='NodeSocketFloat')
@@ -898,19 +1029,28 @@ def _build_fog_group2(vfx, has_bg=True):
     if has_bg:
         ng.interface.new_socket("BG Image", in_out='INPUT', socket_type='NodeSocketColor')
         ng.interface.new_socket("F_BG", in_out='INPUT', socket_type='NodeSocketFloat')
+
     meta = []
     for layer in reversed(vfx.layers):
         if not (layer.enabled and layer.scene):
             continue
-        meta.append({"id": layer.id, "layer": layer, "shd": bool(layer.shadow_scene)})
-        ng.interface.new_socket(f"OBJ_{layer.id}", in_out='INPUT', socket_type='NodeSocketColor')
-        ng.interface.new_socket(f"AL_{layer.id}", in_out='INPUT', socket_type='NodeSocketFloat')
-        ng.interface.new_socket(f"F_{layer.id}", in_out='INPUT', socket_type='NodeSocketFloat')
+        meta.append({"id": layer.id, "layer": layer,
+                     "shd": bool(layer.shadow_scene)})
+        ng.interface.new_socket(f"OBJ_{layer.id}", in_out='INPUT',
+                                socket_type='NodeSocketColor')
+        ng.interface.new_socket(f"AL_{layer.id}", in_out='INPUT',
+                                socket_type='NodeSocketFloat')
+        ng.interface.new_socket(f"F_{layer.id}", in_out='INPUT',
+                                socket_type='NodeSocketFloat')
         if layer.shadow_scene:
-            ng.interface.new_socket(f"SHD_{layer.id}", in_out='INPUT', socket_type='NodeSocketColor')
-            ng.interface.new_socket(f"SS_{layer.id}", in_out='INPUT', socket_type='NodeSocketFloat')
+            ng.interface.new_socket(f"SHD_{layer.id}", in_out='INPUT',
+                                    socket_type='NodeSocketColor')
+            ng.interface.new_socket(f"SS_{layer.id}", in_out='INPUT',
+                                    socket_type='NodeSocketFloat')
+
     ng.interface.new_socket("Image", in_out='OUTPUT', socket_type='NodeSocketColor')
     ng.interface.new_socket("Mask", in_out='OUTPUT', socket_type='NodeSocketFloat')
+
     gin = ng.nodes.new("NodeGroupInput")
     gin.location = (-1100, 0)
     gout = ng.nodes.new("NodeGroupOutput")
@@ -1006,25 +1146,31 @@ def _build_fog_group2(vfx, has_bg=True):
     if has_bg:
         cur = fogged(g_in("BG Image"), g_in("F_BG"), None, y)
         y -= 250
+
     for entry in meta:
         lid = entry["id"]
-        fog_obj = fogged(g_in(f"OBJ_{lid}"), g_in(f"F_{lid}"), g_in(f"AL_{lid}"), y)
+        fog_obj = fogged(g_in(f"OBJ_{lid}"), g_in(f"F_{lid}"),
+                         g_in(f"AL_{lid}"), y)
         y -= 250
         if cur is None:
             cur = fog_obj
         else:
             cur = alpha_over(cur, fog_obj, y=y)
         if entry["shd"]:
-            cur = alpha_over(cur, g_in(f"SHD_{lid}"), fac_sock=g_in(f"SS_{lid}"), y=y)
+            cur = alpha_over(cur, g_in(f"SHD_{lid}"),
+                             fac_sock=g_in(f"SS_{lid}"), y=y)
         y -= 250
+
     if cur is None:
         return ng, meta
+
     oi = gout.inputs.get("Image")
     if oi is not None:
         ng.links.new(cur, oi)
     mk = gout.inputs.get("Mask")
     if mk is not None:
         ng.links.new(mask_out, mk)
+
     return ng, meta
 
 
@@ -1033,13 +1179,21 @@ def build_comp_assembly(vfx, master, nt=None):
         nt = get_comp_tree(master)
     if not nt:
         return
+
+    # Verify tree matches scene
+    scene_tree = _find_comp_tree_attr(master)
+    if scene_tree is not None and scene_tree is not nt:
+        nt = scene_tree
+
     for node in list(nt.nodes):
         if node.get("vfx_mix"):
             nt.nodes.remove(node)
+
     if not getattr(vfx, "use_fog", False):
         fg = nt.nodes.get("VFX_FOG_GROUP")
         if fg is not None:
             nt.nodes.remove(fg)
+
     _cleanup_fog_nodes(nt)
     _cleanup_mask_nodes(nt)
     _remove_vfx_nodes(nt, "VFX_BLUR", "VFX_BLURRAMP", "VFX_BLURMATH")
@@ -1052,12 +1206,15 @@ def build_comp_assembly(vfx, master, nt=None):
     for layer in reversed(vfx.layers):
         if not layer.enabled:
             continue
+
         sh_sock = None
         ob_sock = None
+
         if layer.shadow_scene:
             sh = nt.nodes.get(f"VFX_RL_{layer.id}_SHD")
             if sh and sh.outputs.get("Image"):
                 sh_sock = sh.outputs["Image"]
+
         if layer.scene:
             ob = nt.nodes.get(f"VFX_RL_{layer.id}")
             if ob and ob.outputs.get("Image"):
@@ -1125,14 +1282,22 @@ def build_comp_assembly(vfx, master, nt=None):
                 sockets.append((layer, "SHD", sh_sock))
             if ob_sock:
                 sockets.append((layer, "OBJ", ob_sock))
+
     bg_sock = None
     bgn = nt.nodes.get("VFX_RL_BG")
     if bgn is not None and bgn.outputs.get("Image"):
         bg_sock = bgn.outputs["Image"]
+
     if not sockets and bg_sock is None:
         return
+
     view_sock = None
     fog_done = False
+
+    # ── PER-LAYER GRADES ──
+    grade_nodes = ensure_layer_grades(vfx, master, nt)
+
+    # туман
     if getattr(vfx, "use_fog", False):
         try:
             _ensure_fogmap(nt, vfx, master)
@@ -1142,7 +1307,9 @@ def build_comp_assembly(vfx, master, nt=None):
                 gnode = nt.nodes.get("VFX_FOG_GROUP")
                 if gnode is None:
                     gnode = None
-                    for bid in ("CompositorNodeGroup", "ShaderNodeGroup", "NodeGroup"):
+                    for bid in ("CompositorNodeGroup",
+                                "ShaderNodeGroup",
+                                "NodeGroup"):
                         try:
                             gnode = nt.nodes.new(bid)
                             break
@@ -1161,10 +1328,15 @@ def build_comp_assembly(vfx, master, nt=None):
                     nt.links.new(out, sock)
 
                 gi = lambda n: gnode.inputs.get(n)
+
                 sm = gi("Mist")
                 if sm is not None:
                     relink(sm, mist)
-                for name, val in (("Strength", vfx.fog_strength), ("Ramp Black", vfx.ramp_black), ("Ramp White", vfx.ramp_white), ("F_BG", vfx.bg_fog_factor)):
+
+                for name, val in (("Strength", vfx.fog_strength),
+                                  ("Ramp Black", vfx.ramp_black),
+                                  ("Ramp White", vfx.ramp_white),
+                                  ("F_BG", vfx.bg_fog_factor)):
                     s = gi(name)
                     if s is not None:
                         s.default_value = val
@@ -1196,19 +1368,30 @@ def build_comp_assembly(vfx, master, nt=None):
                     except Exception:
                         pass
                 sbg = gi("BG Image")
-                if sbg is not None and bgn is not None and bgn.outputs.get("Image"):
+                if sbg is not None and bgn is not None \
+                        and bgn.outputs.get("Image"):
                     relink(sbg, bgn.outputs["Image"])
+
                 for entry in meta:
                     lid = entry["id"]
                     lay = entry["layer"]
                     ln = nt.nodes.get(f"VFX_RL_{lid}")
-                    if ln is None:
-                        continue
+                    grade_n = grade_nodes.get(lid)
+                    if grade_n is not None:
+                        src_sock = grade_n.outputs.get("Image")
+                        if ln and ln.outputs.get("Image"):
+                            grade_in = grade_n.inputs.get("Image")
+                            if grade_in is not None:
+                                for l in list(grade_in.links):
+                                    nt.links.remove(l)
+                                nt.links.new(ln.outputs["Image"], grade_in)
+                    else:
+                        src_sock = ln.outputs.get("Image") if ln else None
                     s = gi(f"OBJ_{lid}")
-                    if s is not None and ln.outputs.get("Image"):
-                        relink(s, ln.outputs["Image"])
+                    if s is not None and src_sock is not None:
+                        relink(s, src_sock)
                     s = gi(f"AL_{lid}")
-                    if s is not None and ln.outputs.get("Alpha"):
+                    if s is not None and ln is not None and ln.outputs.get("Alpha"):
                         relink(s, ln.outputs["Alpha"])
                     s = gi(f"F_{lid}")
                     if s is not None:
@@ -1216,11 +1399,13 @@ def build_comp_assembly(vfx, master, nt=None):
                     if entry["shd"]:
                         shn = nt.nodes.get(f"VFX_RL_{lid}_SHD")
                         s = gi(f"SHD_{lid}")
-                        if s is not None and shn is not None and shn.outputs.get("Image"):
+                        if s is not None and shn is not None \
+                                and shn.outputs.get("Image"):
                             relink(s, shn.outputs["Image"])
                         s = gi(f"SS_{lid}")
                         if s is not None:
                             s.default_value = lay.shadow_strength
+
                 oi = gnode.outputs.get("Image")
                 if oi is not None:
                     current = oi
@@ -1233,13 +1418,32 @@ def build_comp_assembly(vfx, master, nt=None):
             import traceback
             print("VFX fog apply error:", e)
             traceback.print_exc()
+
+    # без тумана
     if not fog_done:
+        for layer_id, grade_n in grade_nodes.items():
+            ln = nt.nodes.get(f"VFX_RL_{layer_id}")
+            if ln and ln.outputs.get("Image"):
+                grade_in = grade_n.inputs.get("Image")
+                if grade_in is not None:
+                    for l in list(grade_in.links):
+                        nt.links.remove(l)
+                    nt.links.new(ln.outputs["Image"], grade_in)
+
+        graded_sockets = []
+        for layer, kind, sock in sockets:
+            grade_n = grade_nodes.get(layer.id) if kind == 'OBJ' else None
+            if grade_n is not None and grade_n.outputs.get("Image"):
+                graded_sockets.append((layer, kind, grade_n.outputs["Image"]))
+            else:
+                graded_sockets.append((layer, kind, sock))
         if bg_sock is not None:
             current = bg_sock
-            mix_list = sockets
+            mix_list = graded_sockets
         else:
-            current = sockets[0][2]
-            mix_list = sockets[1:]
+            current = graded_sockets[0][2]
+            mix_list = graded_sockets[1:]
+
         mix_index = 0
         for layer, kind, sock in mix_list:
             mix = nt.nodes.new("CompositorNodeAlphaOver")
@@ -1247,12 +1451,15 @@ def build_comp_assembly(vfx, master, nt=None):
             mix.label = f"{layer.layer_name} {kind}"
             mix["vfx_mix"] = 1
             mix.location = (800, -mix_index * 200)
+
             img = [s for s in mix.inputs if s.type == 'RGBA']
             fac = [s for s in mix.inputs if s.type == 'VALUE']
+
             if len(img) >= 2:
                 bg, fg = img[0], img[1]
             else:
                 bg, fg = mix.inputs[1], mix.inputs[2]
+
             mix_fac = 1.0
             if kind == 'SHD':
                 mix_fac = getattr(layer, "shadow_strength", 1.0)
@@ -1261,8 +1468,10 @@ def build_comp_assembly(vfx, master, nt=None):
                     f.default_value = mix_fac
                 except Exception:
                     pass
+
             nt.links.new(current, bg)
             nt.links.new(sock, fg)
+
             outs = [s for s in mix.outputs if s.type == 'RGBA']
             current = outs[0] if outs else mix.outputs[0]
             mix_index += 1
@@ -1371,6 +1580,7 @@ def build_comp_assembly(vfx, master, nt=None):
     else:
         _remove_nodes(nt, "VFX_DOF", "VFX_DOF_PRE")
 
+    # ── GLOW / GLARE ──
     if getattr(vfx, "use_glare", False):
         try:
             gl = nt.nodes.get("VFX_GLARE")
@@ -1412,6 +1622,7 @@ def build_comp_assembly(vfx, master, nt=None):
     else:
         _remove_nodes(nt, "VFX_GLARE")
 
+    # ── LENS DISTORTION ──
     if getattr(vfx, "use_lensdist", False):
         ld = nt.nodes.get("VFX_LENSDIST")
         if ld is not None and ld.type != 'LENSDIST':
@@ -1525,6 +1736,7 @@ def build_comp_assembly(vfx, master, nt=None):
     # Color Match: plate matching node group
     if getattr(vfx, "use_color_match", False):
         try:
+            from .colormatch import get_or_create_color_match_group, apply_preset
             cm_ng = get_or_create_color_match_group()
             preset = getattr(vfx, "color_match_preset", "NONE")
             strength = getattr(vfx, "color_match_strength", 1.0)
@@ -1543,7 +1755,6 @@ def build_comp_assembly(vfx, master, nt=None):
                     except Exception:
                         continue
                 if cm_node is not None:
-                    cm_node.name = "VFX_COLORMATCH"
                     cm_node.label = "COLOR MATCH"
                     cm_node["vfx_colormatch"] = 1
             if cm_node is not None:
@@ -1564,16 +1775,18 @@ def build_comp_assembly(vfx, master, nt=None):
                         break
         except Exception as e:
             print("VFX color match error:", e)
-    else:
-        _remove_nodes(nt, "VFX_COLORMATCH")
 
+    # ── COMPOSITE OUTPUT ──
     comp = None
     for node in nt.nodes:
         if node.type == 'COMPOSITE':
             comp = node
             break
+
     if comp is None:
-        for bid in ("CompositorNodeComposite", "CompositorNodeOutput", "NodeComposite"):
+        for bid in ("CompositorNodeComposite",
+                    "CompositorNodeOutput",
+                    "NodeComposite"):
             try:
                 comp = nt.nodes.new(bid)
                 comp.location = (_PX_OUT, _PY)
@@ -1581,9 +1794,11 @@ def build_comp_assembly(vfx, master, nt=None):
             except Exception:
                 comp = None
                 continue
+
     if comp is not None and len(comp.inputs) > 0:
         target_sock = comp.inputs.get("Image") or comp.inputs[0]
         nt.links.new(current, target_sock)
+
     try:
         gout = None
         for node in nt.nodes:
@@ -1592,7 +1807,9 @@ def build_comp_assembly(vfx, master, nt=None):
                 break
         if gout is None:
             try:
-                nt.interface.new_socket("Image", in_out='OUTPUT', socket_type='NodeSocketColor')
+                nt.interface.new_socket(
+                    "Image", in_out='OUTPUT', socket_type='NodeSocketColor'
+                )
             except Exception:
                 pass
             gout = nt.nodes.new("NodeGroupOutput")
@@ -1601,8 +1818,10 @@ def build_comp_assembly(vfx, master, nt=None):
             nt.links.new(current, gout.inputs[0])
     except Exception:
         pass
+
     if view_sock is None:
         view_sock = current
+
     for node in nt.nodes:
         if node.type == 'VIEWER' and len(node.inputs) > 0:
             vsock = node.inputs.get("Image") or node.inputs[0]
@@ -1665,6 +1884,20 @@ def _self_check_masks(nt, vfx):
         lines.append("  all mask chains OK")
     print("\n".join(lines))
 
+    try:
+        nt.update_tag()
+    except Exception:
+        pass
+    for window in bpy.context.window_manager.windows:
+        for area in window.screen.areas:
+            area.tag_redraw()
+
+
+
+
+# ---------------------------------------------------------------------
+# FOG
+# ---------------------------------------------------------------------
 
 def _update_mist(context):
     try:
@@ -1680,8 +1913,10 @@ def _update_mist(context):
 
 
 def _setup_fog_passes(vfx, master, force=False):
+    """Сцена VFX_FOGMAP со всеми объектами для live mist-маски."""
     if not force and not getattr(vfx, "use_fog", False):
         return
+
     w = master.world
     if w is not None:
         try:
@@ -1689,6 +1924,7 @@ def _setup_fog_passes(vfx, master, force=False):
             w.mist_settings.depth = vfx.mist_depth
         except Exception:
             pass
+
     sc = getattr(vfx, "fog_map_scene", None) or bpy.data.scenes.get("VFX_FOGMAP")
     if sc is None:
         sc = create_empty_scene("VFX_FOGMAP", master)
@@ -1698,6 +1934,7 @@ def _setup_fog_passes(vfx, master, force=False):
         except Exception:
             pass
     vfx.fog_map_scene = sc
+
     root = ensure_root(master)
     cam_col = ensure_camera_collection(master, root)
     link_collection_to_scene(sc, cam_col)
@@ -1706,6 +1943,7 @@ def _setup_fog_passes(vfx, master, force=False):
     for layer in vfx.layers:
         if layer.collection:
             link_collection_to_scene(sc, layer.collection)
+
     sync_scene_settings(master, sc)
     try:
         sc.render.engine = 'BLENDER_EEVEE_NEXT'
@@ -1714,6 +1952,7 @@ def _setup_fog_passes(vfx, master, force=False):
             sc.render.engine = 'BLENDER_EEVEE'
         except Exception:
             pass
+
     for vl in sc.view_layers:
         try:
             vl.use_pass_mist = True

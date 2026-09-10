@@ -11,9 +11,9 @@ bl_info = {
 VFX_VERSION = "2.5.0"
 
 import bpy
-import gc
+import importlib
 import os
-import shutil
+import sys
 from bpy.props import (
     StringProperty,
     BoolProperty,
@@ -27,7 +27,7 @@ from bpy.props import (
 
 
 # ---------------------------------------------------------------------
-# CALLBACKS
+# CALLBACKS (defined early so PropertyGroup lambdas can reference them)
 # ---------------------------------------------------------------------
 
 def _trigger_rebuild(context):
@@ -55,6 +55,7 @@ def _update_mist(context):
 
 
 def _auto_mask(ctx, source):
+    """Auto-switch mask source when an effect slider is edited."""
     try:
         vfx = ctx.scene.vfx
         if vfx.use_mask:
@@ -240,6 +241,44 @@ class VFXLayer(bpy.types.PropertyGroup):
         name="Expanded",
         description="Show shadow pass sub-row",
         default=False
+    )
+
+    # -- Per-layer grade --
+    grade_enable: BoolProperty(
+        name="Grade",
+        description="Enable per-layer color grading (before FOG)",
+        default=False,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    l_exposure: FloatProperty(
+        name="Exposure", default=0.0, min=-6.0, max=6.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    l_temp: FloatProperty(
+        name="Temperature", default=0.0, min=-1.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    l_tint: FloatProperty(
+        name="Tint", default=0.0, min=-1.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    l_lift: FloatVectorProperty(
+        name="Lift", subtype='COLOR', size=3,
+        default=(0.0, 0.0, 0.0), min=0.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    l_gain: FloatVectorProperty(
+        name="Gain", subtype='COLOR', size=3,
+        default=(1.0, 1.0, 1.0), min=0.0, max=2.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    l_sat: FloatProperty(
+        name="Saturation", default=1.0, min=0.0, max=2.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    l_contrast: FloatProperty(
+        name="Contrast", default=1.0, min=0.0, max=2.0,
+        update=lambda s, c: _trigger_comp(c)
     )
 
 
@@ -580,42 +619,47 @@ class VFXProject(bpy.types.PropertyGroup):
         update=lambda s, c: _trigger_comp(c)
     )
 
-    # Color Match / Plate Matching
-    use_color_match: BoolProperty(
-        name="Color Match",
-        description="Enable color correction (plate matching)",
+    # -- Master grade --
+    m_grade_enable: BoolProperty(
+        name="Master Grade",
+        description="Enable master color grading (after all post-effects)",
         default=False,
         update=lambda s, c: _trigger_comp(c)
     )
-    color_match_preset: EnumProperty(
-        name="Preset",
-        items=(
-            ('NONE', "Off", "No color correction"),
-            ('WARM', "Warm", "Add warmth to the image"),
-            ('TEAL_ORANGE', "Teal & Orange", "Cinematic teal/orange look"),
-            ('COOL', "Cool", "Cool blue tones"),
-            ('FILM', "Film", "Desaturated film look"),
-        ),
-        default='NONE',
+    m_exposure: FloatProperty(
+        name="M: Exposure", default=0.0, min=-6.0, max=6.0,
         update=lambda s, c: _trigger_comp(c)
     )
-    color_match_strength: FloatProperty(
-        name="Strength", default=1.0, min=0.0, max=2.0,
-        description="Blend between original and color-corrected",
+    m_temp: FloatProperty(
+        name="M: Temperature", default=0.0, min=-1.0, max=1.0,
         update=lambda s, c: _trigger_comp(c)
     )
-
-    # Light Groups
-    use_light_groups: BoolProperty(
-        name="Light Groups",
-        description="Enable light group passes for per-light control in comp",
-        default=False,
+    m_tint: FloatProperty(
+        name="M: Tint", default=0.0, min=-1.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    m_lift: FloatVectorProperty(
+        name="M: Lift", subtype='COLOR', size=3,
+        default=(0.0, 0.0, 0.0), min=0.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    m_gain: FloatVectorProperty(
+        name="M: Gain", subtype='COLOR', size=3,
+        default=(1.0, 1.0, 1.0), min=0.0, max=2.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    m_saturation: FloatProperty(
+        name="M: Saturation", default=1.0, min=0.0, max=2.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    m_contrast: FloatProperty(
+        name="M: Contrast", default=1.0, min=0.0, max=2.0,
         update=lambda s, c: _trigger_comp(c)
     )
 
 
 # ---------------------------------------------------------------------
-# SUBMODULE IMPORTS
+# SUBMODULE IMPORTS (after class definitions to avoid circular import)
 # ---------------------------------------------------------------------
 
 from .core import get_project, active_layer, sync_scene_settings, ensure_root
@@ -653,7 +697,7 @@ from .lightgroups import (
 
 
 # ---------------------------------------------------------------------
-# REGISTER / UNREGISTER
+# REGISTER
 # ---------------------------------------------------------------------
 
 classes = (
@@ -683,52 +727,135 @@ classes = (
     VFX_OT_delete_shadow_pass,
     VFX_OT_refresh_proxies,
     VFX_OT_diagnostic,
-    VFX_OT_setup_light_groups,
     VFX_OT_apply_color_preset,
+    VFX_OT_enable_cryptomatte,
+    VFX_OT_disable_cryptomatte,
+    VFX_OT_reset_layer_grade,
+    VFX_OT_reset_master_grade,
+    VFX_OT_copy_master_grade,
     VFX_PT_main,
     VFX_PT_post_effects,
     VFX_PT_compositor,
     VFX_PT_compositor_effects,
 )
 
+CLASS_NAMES = tuple(cls.__name__ for cls in classes)
 
-def register():
-    for cls in classes:
+
+# ---------------------------------------------------------------------
+# AUTO-RELOAD (dev convenience)
+# ---------------------------------------------------------------------
+
+_AUTO_RELOAD_ENABLED = True
+_AUTO_RELOAD_INTERVAL = 2  # seconds
+_FILE_TIMESTAMPS = {}
+_AUTO_RELOAD_FIRST_RUN = True
+
+
+def _auto_reload_timer():
+    """Check source files for changes; reload changed modules."""
+    global _AUTO_RELOAD_FIRST_RUN
+
+    if not _AUTO_RELOAD_ENABLED:
+        return None
+
+    addon_dir = os.path.dirname(__file__)
+    changed_files = []
+
+    if _AUTO_RELOAD_FIRST_RUN:
+        _AUTO_RELOAD_FIRST_RUN = False
+        print(f"VFX auto-reload: watching {addon_dir}")
+
+    for filename in os.listdir(addon_dir):
+        if not filename.endswith(".py"):
+            continue
+        filepath = os.path.join(addon_dir, filename)
         try:
-            bpy.utils.register_class(cls)
-        except Exception as exc:
-            print(f"VFX register ERROR {cls.__name__}: {exc}")
+            mtime = os.path.getmtime(filepath)
+        except OSError:
+            continue
+        if filename in _FILE_TIMESTAMPS and _FILE_TIMESTAMPS[filename] != mtime:
+            changed_files.append(filename)
+        _FILE_TIMESTAMPS[filename] = mtime
 
-    bpy.types.Scene.vfx = PointerProperty(type=VFXProject)
-    print(f"VFX Layer Tools v{VFX_VERSION} registered ({len(classes)} classes)")
+    if changed_files:
+        print(f"VFX auto-reload: changed {', '.join(changed_files)}")
+        try:
+            unregister()
+
+            # Reload every vfx_layer_tools.* module
+            to_reload = [n for n in list(sys.modules) if n.startswith("vfx_layer_tools")]
+            for mod_name in to_reload:
+                mod = sys.modules.get(mod_name)
+                if mod is not None:
+                    try:
+                        importlib.reload(mod)
+                    except Exception as exc:
+                        print(f"  reload error {mod_name}: {exc}")
+
+            register()
+            print("VFX auto-reload: done")
+        except Exception as exc:
+            print(f"VFX auto-reload failed: {exc}")
+
+    return _AUTO_RELOAD_INTERVAL
 
 
 def unregister():
-    # Remove Scene.vfx
+    # stop auto-reload timer
+    try:
+        bpy.app.timers.unregister(_auto_reload_timer)
+    except Exception:
+        pass
+
+    # Always destroy Scene.vfx so register() recreates it with fresh properties
     if hasattr(bpy.types.Scene, "vfx"):
         try:
             del bpy.types.Scene.vfx
         except Exception:
             pass
 
-    # Unregister classes in reverse order
-    for cls in reversed(classes):
+    for name in CLASS_NAMES:
+        old = getattr(bpy.types, name, None)
+        if old is not None:
+            try:
+                bpy.utils.unregister_class(old)
+            except Exception:
+                pass
+
+
+def register():
+    print(f"VFX register() called, {len(classes)} classes to register")
+    unregister()
+
+    for cls in classes:
+        if not hasattr(bpy.types, cls.__name__):
+            try:
+                bpy.utils.register_class(cls)
+            except Exception as exc:
+                print(f"VFX register ERROR {cls.__name__}: {exc}")
+
+    bpy.types.Scene.vfx = PointerProperty(type=VFXProject)
+    print("VFX: Scene.vfx created")
+
+    # kick off auto-reload timer
+    if _AUTO_RELOAD_ENABLED:
         try:
-            bpy.utils.unregister_class(cls)
-        except Exception:
-            pass
-
-    # Clean up __pycache__ so Windows can update the extension directory
-    gc.collect()
-    try:
-        pycache = os.path.join(os.path.dirname(__file__), "__pycache__")
-        if os.path.isdir(pycache):
-            shutil.rmtree(pycache, ignore_errors=True)
-    except Exception:
-        pass
-
-    print("VFX Layer Tools unregistered")
+            addon_dir = os.path.dirname(__file__)
+            for filename in os.listdir(addon_dir):
+                if filename.endswith(".py"):
+                    filepath = os.path.join(addon_dir, filename)
+                    _FILE_TIMESTAMPS[filename] = os.path.getmtime(filepath)
+            bpy.app.timers.register(_auto_reload_timer, first_interval=_AUTO_RELOAD_INTERVAL)
+            print(f"VFX auto-reload: watching for changes every {_AUTO_RELOAD_INTERVAL}s")
+        except Exception as exc:
+            print(f"VFX auto-reload init error: {exc}")
 
 
 if __name__ == "__main__":
     register()
+    try:
+        repair_shadow_proxies()
+        print("VFX: shadow proxies repaired")
+    except Exception as e:
+        print("VFX repair error:", e)
