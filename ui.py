@@ -5,6 +5,7 @@ import bpy
 from . import VFX_VERSION
 from .core import get_project, active_layer
 from .materials import _last_adjust_stats
+from .occlusion import compute_composite_order, _camera_distance
 
 
 # ---------------------------------------------------------------------
@@ -138,6 +139,41 @@ def _draw_layer_list(context, layout):
 
         if vfx.use_fog:
             box.prop(layer, "fog_factor")
+
+        # ── OCCLUSION (holdout) ──
+        obox = box.box()
+        ohead = obox.row(align=True)
+        ohead.prop(layer, "occlusion_expanded", text="", icon='TRIA_DOWN' if layer.occlusion_expanded else 'TRIA_RIGHT', emboss=False)
+        ohead.label(text="OCCLUSION", icon='MOD_BOOLEAN')
+        ohead.prop(layer, "occlusion_mode", text="")
+        if layer.occlusion_expanded:
+            oc = obox.column(align=True)
+            if layer.occlusion_mode == 'MANUAL':
+                oc.label(text="Occluder layers:", icon='RESTRICT_RENDER_ON')
+                for ref in layer.occlusion_layers:
+                    other = next((l for l in vfx.layers if l.id == ref.layer_id), None)
+                    if other is None:
+                        continue
+                    r = oc.row(align=True)
+                    r.prop(ref, "include", text="")
+                    r.label(text=other.layer_name, icon='SCENE_DATA')
+                oc.operator("vfx.refresh_occlusion", icon='FILE_REFRESH')
+            elif layer.occlusion_mode == 'AUTO':
+                others = [l.layer_name for l in vfx.layers
+                          if l.id != layer.id and l.enabled]
+                if others:
+                    oc.label(text=f"Occluders: all other layers ({len(others)})", icon='INFO')
+                    oc.label(text=" | ".join(others), icon='DOT')
+                else:
+                    oc.label(text="No other layers yet", icon='INFO')
+            else:  # OFF
+                oc.label(text="Occlusion disabled", icon='X')
+            n_prox = 0
+            if layer.occlusion_collection:
+                n_prox = sum(1 for o in layer.occlusion_collection.objects
+                             if o.get("vfx_proxy"))
+            oc.label(text=f"Holdout proxies: {n_prox}", icon='MOD_MESHDEFORM')
+
         box.separator()
         box.prop(layer, "use_adjust")
         if layer.use_adjust:
@@ -345,11 +381,32 @@ def _draw_advanced_features(context, layout):
         box.label(text="Auto-assigns Key/Fill/Rim/Env", icon='INFO')
 
 
+def _draw_composite_order(context, layout):
+    """Global composite sort mode + live display of the computed order."""
+    vfx, master = get_project(context, allow_write=False)
+
+    cbox = layout.box()
+    cbox.label(text="COMPOSITING ORDER", icon='SORTSIZE')
+    cbox.prop(vfx, "composite_sort_mode", text="Sort")
+    seq = compute_composite_order(vfx, master, verbose=False)
+    col = cbox.column(align=True)
+    col.label(text="bottom -> top:", icon='TRIA_DOWN')
+    if vfx.bg_scene is not None:
+        col.label(text="  BACKGROUND", icon='WORLD')
+    for l in seq:
+        d = _camera_distance(master, l)
+        suffix = f"  ({d:.1f}m)" if (d is not None and vfx.composite_sort_mode == 'AUTO') else ""
+        col.label(text=f"  {l.layer_name}{suffix}", icon='SCENE_DATA')
+    if vfx.composite_sort_mode == 'AUTO':
+        col.label(text="nearest = on top", icon='INFO')
+
+
 def _draw_render_settings(context, layout):
     """Shared: render engines, output, rebuild buttons."""
     vfx, master = get_project(context, allow_write=False)
 
     layout.separator()
+    _draw_composite_order(context, layout)
     layout.prop(vfx, "output_dir", text="Output")
 
     layout.operator(

@@ -10,6 +10,7 @@ from .core import (
 from .materials import _trigger_comp
 from .colormatch import get_or_create_color_match_group, apply_preset
 from .grade import ensure_layer_grades, ensure_master_grade, apply_grade_values
+from .occlusion import compute_composite_order, occlusion_self_check
 from .lightgroups import add_light_group_output_nodes
 
 
@@ -1016,7 +1017,7 @@ def _fog_mix_node(ng, loc):
             mix.outputs[0] if len(mix.outputs) else None)
 
 
-def _build_fog_group2(vfx, has_bg=True):
+def _build_fog_group2(vfx, has_bg=True, order=None):
     ng = bpy.data.node_groups.get("VFX_FogGroup")
     if ng is None:
         ng = bpy.data.node_groups.new("VFX_FogGroup", 'CompositorNodeTree')
@@ -1040,7 +1041,9 @@ def _build_fog_group2(vfx, has_bg=True):
         ng.interface.new_socket("F_BG", in_out='INPUT', socket_type='NodeSocketFloat')
 
     meta = []
-    for layer in reversed(vfx.layers):
+    if order is None:
+        order = list(reversed(vfx.layers))  # legacy: list order back-to-front
+    for layer in order:
         if not (layer.enabled and layer.scene):
             continue
         meta.append({"id": layer.id, "layer": layer,
@@ -1209,8 +1212,13 @@ def build_comp_assembly(vfx, master, nt=None):
     for node in list(nt.nodes):
         if node.type == 'CRYPTOMATTE' and node.name != "VFX_CRYPTO_PICK":
             nt.nodes.remove(node)
+    # ── COMPUTED STACKING ORDER (back -> front) ──
+    # AUTO: by camera distance (nearest layer on top) | MANUAL: list order.
+    # BACKGROUND (bg_sock) is always composited first = bottom.
+    order = compute_composite_order(vfx, master, verbose=True)
+
     sockets = []
-    for layer in reversed(vfx.layers):
+    for layer in order:
         if not layer.enabled:
             continue
 
@@ -1226,16 +1234,11 @@ def build_comp_assembly(vfx, master, nt=None):
             ob = nt.nodes.get(f"VFX_RL_{layer.id}")
             if ob and ob.outputs.get("Image"):
                 ob_sock = ob.outputs["Image"]
-        if getattr(layer, "shadow_mode", "CAST") == 'RECEIVE':
-            if ob_sock:
-                sockets.append((layer, "OBJ", ob_sock))
-            if sh_sock:
-                sockets.append((layer, "SHD", sh_sock))
-        else:
-            if sh_sock:
-                sockets.append((layer, "SHD", sh_sock))
-            if ob_sock:
-                sockets.append((layer, "OBJ", ob_sock))
+        # back-to-front within a layer: shadow pass first, object on top
+        if sh_sock:
+            sockets.append((layer, "SHD", sh_sock))
+        if ob_sock:
+            sockets.append((layer, "OBJ", ob_sock))
 
     bg_sock = None
     bgn = nt.nodes.get("VFX_RL_BG")
@@ -1257,7 +1260,8 @@ def build_comp_assembly(vfx, master, nt=None):
             _ensure_fogmap(nt, vfx, master)
             mist = _get_mist_socket(nt)
             if mist is not None:
-                ng, meta = _build_fog_group2(vfx, has_bg=bg_sock is not None)
+                ng, meta = _build_fog_group2(vfx, has_bg=bg_sock is not None,
+                                             order=order)
                 gnode = nt.nodes.get("VFX_FOG_GROUP")
                 if gnode is None:
                     gnode = None
@@ -1747,6 +1751,7 @@ def build_comp_assembly(vfx, master, nt=None):
             break
     try:
         _self_check_masks(nt, vfx)
+        occlusion_self_check(vfx, master)
     except Exception:
         pass
 

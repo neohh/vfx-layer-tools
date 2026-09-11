@@ -1,14 +1,14 @@
 bl_info = {
     "name": "VFX Layer Tools",
     "author": "VFX Pipeline",
-    "version": (3, 2, 1),
+    "version": (3, 3, 0),
     "blender": (5, 2, 1),
     "location": "View3D > Sidebar > VFX",
     "description": "VFX layer / scene / compositing manager",
     "category": "Compositing",
 }
 
-VFX_VERSION = "3.2.1"
+VFX_VERSION = "3.3.0"
 
 import bpy
 import importlib
@@ -119,6 +119,12 @@ _MASK_SOURCE_ITEMS = (
 # PROPERTIES
 # ---------------------------------------------------------------------
 
+class VFXOcclusionRef(bpy.types.PropertyGroup):
+    """Manual occluder reference: one entry per other layer."""
+    layer_id: StringProperty(default="")
+    include: BoolProperty(default=True)
+
+
 class VFXLayer(bpy.types.PropertyGroup):
     id: StringProperty(default="")
     layer_name: StringProperty(default="Layer")
@@ -224,6 +230,25 @@ class VFXLayer(bpy.types.PropertyGroup):
         default=False
     )
 
+    # -- Inter-layer occlusion (holdout) --
+    occlusion_mode: EnumProperty(
+        name="Occlusion",
+        items=(
+            ('AUTO', "Auto", "All other layers occlude this one (recommended)"),
+            ('MANUAL', "Manual", "Pick occluder layers manually"),
+            ('OFF', "Off", "No occlusion: layer always renders on top of nothing"),
+        ),
+        default='AUTO',
+        update=lambda s, c: _trigger_comp(c),
+    )
+    occlusion_layers: CollectionProperty(type=VFXOcclusionRef)
+    occlusion_collection: PointerProperty(type=bpy.types.Collection)
+    occlusion_expanded: BoolProperty(
+        name="Occlusion expanded",
+        description="Show occlusion section of this layer",
+        default=False,
+    )
+
     # -- Per-layer grade --
     grade_enable: BoolProperty(
         name="Grade",
@@ -265,6 +290,17 @@ class VFXLayer(bpy.types.PropertyGroup):
 
 class VFXProject(bpy.types.PropertyGroup):
     master_scene: PointerProperty(type=bpy.types.Scene)
+
+    composite_sort_mode: EnumProperty(
+        name="Comp Order",
+        items=(
+            ('AUTO', "Auto (by depth)", "Sort layers by camera distance: nearest renders on top"),
+            ('MANUAL', "Manual (list order)", "Use the layer list order (drag to change)"),
+        ),
+        default='AUTO',
+        description="How the compositor stacks layers",
+        update=lambda s, c: _trigger_comp(c),
+    )
 
     layers: CollectionProperty(type=VFXLayer)
     active_layer_index: IntProperty(default=0)
@@ -660,6 +696,10 @@ class VFXProject(bpy.types.PropertyGroup):
 
 from .core import get_project, active_layer, sync_scene_settings, ensure_root
 from .shadow import set_shadow_catcher, refresh_shadow_proxies, repair_shadow_proxies
+from .occlusion import (
+    rebuild_all_occlusion, rebuild_layer_occlusion, remove_occlusion_collection,
+    compute_composite_order, occlusion_self_check,
+)
 from .compositor import (
     get_comp_tree, rebuild_comp, rebuild_comp_from_files,
     build_comp_assembly, _setup_fog_passes, _ensure_fogmap,
@@ -677,6 +717,7 @@ from .operators import (
     VFX_OT_render_all_layers, VFX_OT_one_click_exr,
     VFX_OT_create_background, VFX_OT_delete_background,
     VFX_OT_delete_shadow_pass, VFX_OT_refresh_proxies,
+    VFX_OT_refresh_occlusion,
     VFX_OT_diagnostic,
     VFX_OT_setup_light_groups, VFX_OT_apply_color_preset,
     VFX_OT_preview_this_mask, VFX_OT_pick_cryptomatte,
@@ -700,6 +741,7 @@ from .lightgroups import (
 # ---------------------------------------------------------------------
 
 classes = (
+    VFXOcclusionRef,
     VFXLayer,
     VFXProject,
     VFX_UL_layers,
@@ -725,6 +767,7 @@ classes = (
     VFX_OT_delete_background,
     VFX_OT_delete_shadow_pass,
     VFX_OT_refresh_proxies,
+    VFX_OT_refresh_occlusion,
     VFX_OT_diagnostic,
     VFX_OT_apply_color_preset,
     VFX_OT_preview_this_mask, VFX_OT_pick_cryptomatte,

@@ -18,6 +18,10 @@ from .shadow import (
     set_shadow_catcher, set_only_shadow_caster, refresh_shadow_proxies,
     create_default_catcher,
 )
+from .occlusion import (
+    rebuild_all_occlusion, rebuild_layer_occlusion, remove_occlusion_collection,
+    compute_composite_order, occlusion_self_check,
+)
 from .compositor import (
     get_comp_tree, rebuild_comp, rebuild_comp_from_files,
     build_comp_assembly, ensure_render_node, remove_comp_node,
@@ -117,6 +121,10 @@ class VFX_OT_create_layer(bpy.types.Operator):
         item.enabled = True
         vfx.layers.move(len(vfx.layers) - 1, 0)
         vfx.active_layer_index = 0
+        try:
+            rebuild_all_occlusion(vfx, master)  # new layer => occlusion changes everywhere
+        except Exception as e:
+            print("VFX occlusion error:", e)
         rebuild_comp(vfx, master)
         self.report({'INFO'}, f"Created VFX layer: {name}")
         return {'FINISHED'}
@@ -141,6 +149,11 @@ class VFX_OT_add_selected_to_layer(bpy.types.Operator):
             if layer.collection.objects.get(obj.name) is None:
                 layer.collection.objects.link(obj)
                 count += 1
+        if count:
+            try:
+                rebuild_all_occlusion(vfx, master)  # layer content changed
+            except Exception as e:
+                print("VFX occlusion error:", e)
         self.report({'INFO'}, f"Added {count} object(s) to {layer.layer_name}")
         return {'FINISHED'}
 
@@ -164,6 +177,11 @@ class VFX_OT_remove_selected_from_layer(bpy.types.Operator):
             if layer.collection.objects.get(obj.name) is not None:
                 layer.collection.objects.unlink(obj)
                 count += 1
+        if count:
+            try:
+                rebuild_all_occlusion(vfx, master)  # layer content changed
+            except Exception as e:
+                print("VFX occlusion error:", e)
         self.report({'INFO'}, f"Removed {count} object(s) from {layer.layer_name}")
         return {'FINISHED'}
 
@@ -378,11 +396,16 @@ class VFX_OT_delete_layer(bpy.types.Operator):
                 bpy.data.collections.remove(layer.collection)
             except Exception:
                 pass
+        layer_name = layer.layer_name
         idx = vfx.active_layer_index
         vfx.layers.remove(idx)
         vfx.active_layer_index = max(0, min(idx, len(vfx.layers) - 1))
+        try:
+            rebuild_all_occlusion(vfx, master)  # drop stale occluders/proxies
+        except Exception as e:
+            print("VFX occlusion error:", e)
         rebuild_comp(vfx, master)
-        self.report({'INFO'}, f"Deleted layer: {layer.layer_name}")
+        self.report({'INFO'}, f"Deleted layer: {layer_name}")
         return {'FINISHED'}
 
 
@@ -567,7 +590,7 @@ class VFX_OT_drag_layer(bpy.types.Operator):
         return {'RUNNING_MODAL'}
     def finish(self, context):
         vfx, master = get_project(context, allow_write=True)
-        rebuild_comp(vfx, master)
+        rebuild_comp(vfx, master)  # order follows list order in MANUAL mode
 
 
 class VFX_OT_move_layer_up(bpy.types.Operator):
@@ -736,6 +759,10 @@ class VFX_OT_render_all_layers(bpy.types.Operator):
             refresh_shadow_proxies(vfx, master)
         except Exception as e:
             print("VFX proxy refresh error:", e)
+        try:
+            rebuild_all_occlusion(vfx, master)  # holdouts fresh for every render
+        except Exception as e:
+            print("VFX occlusion refresh error:", e)
         self.steps = []
         total_frames = 0
         for sc in scenes:
@@ -970,7 +997,8 @@ def auto_sync_settings(vfx, master):
                 layer.shadow_scene.render.engine = vfx.shadows_engine
             except Exception:
                 pass
-        for c in (layer.shadow_cast_collection, layer.shadow_catch_collection):
+        for c in (layer.shadow_cast_collection, layer.shadow_catch_collection,
+                  getattr(layer, "occlusion_collection", None)):
             if c:
                 exclude_collection_in_master(master, c)
     bg = getattr(vfx, "bg_scene", None)
@@ -989,7 +1017,25 @@ class VFX_OT_refresh_proxies(bpy.types.Operator):
     def execute(self, context):
         vfx, master = get_project(context, allow_write=True)
         refresh_shadow_proxies(vfx, master)
-        self.report({'INFO'}, "Shadow proxies refreshed")
+        rebuild_all_occlusion(vfx, master, report=True)  # built into Refresh per TZ
+        self.report({'INFO'}, "Shadow + occlusion proxies refreshed")
+        return {'FINISHED'}
+
+
+class VFX_OT_refresh_occlusion(bpy.types.Operator):
+    bl_idname = "vfx.refresh_occlusion"
+    bl_label = "Refresh Occlusion Proxies"
+    bl_description = "Rebuild holdout proxies of the active layer and print occlusion report"
+    bl_options = {'REGISTER', 'UNDO'}
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=True)
+        layer = active_layer(vfx)
+        if not layer:
+            self.report({'ERROR'}, "No active layer")
+            return {'CANCELLED'}
+        n = rebuild_layer_occlusion(vfx, master, layer)
+        occlusion_self_check(vfx, master)
+        self.report({'INFO'}, f"Occlusion rebuilt: {n} holdout proxy(ies) on '{layer.layer_name}'")
         return {'FINISHED'}
 
 

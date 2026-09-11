@@ -10,7 +10,7 @@
 - **Владелец:** neohh
 - **Ветка:** `main`
 - **gh CLI:** залогинен как `neohh` (авторизация через keyring)
-- **Текущая версия:** v2.1.0
+- **Текущая версия:** v3.3.0
 
 ## Где лежат файлы
 
@@ -122,6 +122,7 @@ gh release upload vX.Y.Z vfx_layer_tools_vX.Y.Z.zip --clobber
 | `operators.py` | Все операторы: render, rebuild comp, shadow pass, diagnostics, auto-calibrate |
 | `materials.py` | _trigger_comp, _trigger_rebuild, material editing (adjust viewport materials) |
 | `shadow.py` | Shadow catcher, proxy objects |
+| `occlusion.py` | Взаимная окклюзия слоёв (holdout-прокси VFX_<id>_OCCL), порядок склейки (compute_composite_order), самопроверка |
 | `diagnostic.py` | Полная диагностика: сцены, pass'ы, EXR файлы, композитор ноды |
 | `ui.py` | Панели VFX, Compositor, UIList слоёв |
 
