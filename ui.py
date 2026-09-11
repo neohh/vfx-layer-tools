@@ -144,6 +144,10 @@ def _draw_layer_list(context, layout):
 
         if fx == 'FOG' and vfx.use_fog:
             box.prop(layer, "fog_factor")
+            fb = box.box()
+            fb.label(text="On shared fog map:", icon='MOD_MASK')
+            fb.prop(layer, "fog_map_bias", slider=True)
+            fb.prop(layer, "fog_map_gain", slider=True)
 
         # ── OCCLUSION (holdout) ──
         obox = box.box()
