@@ -299,11 +299,16 @@ def _draw_post_effects(context, layout):
     fr.prop(vfx, "use_fog", text="")
     if vfx.fog_expanded:
         fb = fogbox.column(align=True)
-        fb.prop(vfx, "mist_start")
-        fb.prop(vfx, "mist_depth")
         fr2 = fb.row(align=True)
         fr2.prop(vfx, "ramp_black")
         fr2.prop(vfx, "ramp_white")
+        fb.label(
+            text=(f"depth window: {vfx.mist_start:.1f} ... "
+                  f"{vfx.mist_start + vfx.mist_depth:.1f} m"),
+            icon='INFO'
+        )
+        fb.prop(vfx, "mist_start")
+        fb.prop(vfx, "mist_depth")
         fb.prop(vfx, "fog_strength")
         if vfx.fog_strength > 0.0:
             fb.prop(vfx, "fog_color", text="")

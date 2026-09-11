@@ -1031,8 +1031,6 @@ def _build_fog_group2(vfx, has_bg=True, order=None, bg_fog=False):
             pass
 
     ng.interface.new_socket("Mist", in_out='INPUT', socket_type='NodeSocketColor')
-    ng.interface.new_socket("Mist Start", in_out='INPUT', socket_type='NodeSocketFloat')
-    ng.interface.new_socket("Mist Depth", in_out='INPUT', socket_type='NodeSocketFloat')
     ng.interface.new_socket("Strength", in_out='INPUT', socket_type='NodeSocketFloat')
     ng.interface.new_socket("Extra Mask", in_out='INPUT', socket_type='NodeSocketFloat')
     ng.interface.new_socket("Fog Color", in_out='INPUT', socket_type='NodeSocketColor')
@@ -1089,36 +1087,12 @@ def _build_fog_group2(vfx, has_bg=True, order=None, bg_fog=False):
     except Exception:
         pass
     ng.links.new(g_in("Mist"), mr.inputs.get("Value"))
-    # Ramp props are in METERS, the mist pass is a 0..1 fraction:
-    # fraction = (dist - mist_start) / mist_depth, clamped to [0, 1].
-    converted = False
-    for sock_name, target, dy in (("Ramp Black", "From Min", 480),
-                                  ("Ramp White", "From Max", 320)):
-        sub = math_node('SUBTRACT', (-1080, dy))
-        div = math_node('DIVIDE', (-960, dy))
-        clamp = math_node('MAXIMUM', (-860, dy))
-        if sub is None or div is None:
-            continue
-        ng.links.new(g_in(sock_name), sub.inputs[0])
-        st = g_in("Mist Start")
-        if st is not None:
-            ng.links.new(st, sub.inputs[1])
-        ng.links.new(sub.outputs[0], div.inputs[0])
-        dp = g_in("Mist Depth")
-        if dp is not None:
-            ng.links.new(dp, div.inputs[1])
-        res = div.outputs[0]
-        if clamp is not None:
-            ng.links.new(div.outputs[0], clamp.inputs[0])
-            clamp.inputs[1].default_value = 0.0
-            res = clamp.outputs[0]
-        out_sock = mr.inputs.get(target)
-        if out_sock is not None:
-            ng.links.new(res, out_sock)
-            converted = True
-    if not converted:
-        ng.links.new(g_in("Ramp Black"), mr.inputs.get("From Min"))
-        ng.links.new(g_in("Ramp White"), mr.inputs.get("From Max"))
+    # Ramp Black/White inputs are mist FRACTIONS (0..1 inside the mist
+    # window), already converted from meters and healed in Python by
+    # build_comp_assembly. Doing the conversion with nodes broke badly
+    # whenever Full <= Mist Start (zero/negative range -> factor stuck at 1).
+    ng.links.new(g_in("Ramp Black"), mr.inputs.get("From Min"))
+    ng.links.new(g_in("Ramp White"), mr.inputs.get("From Max"))
     mstr = math_node('MULTIPLY', (-550, 300))
     if mstr is None:
         return ng, meta
@@ -1244,18 +1218,32 @@ def build_comp_assembly(vfx, master, nt=None):
 
     _cleanup_fog_nodes(nt)
     _cleanup_mask_nodes(nt)
-    _remove_vfx_nodes(nt, "VFX_BLUR", "VFX_BLURRAMP", "VFX_BLURMATH")
-
-    # Heal a degenerate fog ramp: "Fog Full" at or below "Fog Start" (a stale
-    # 0..1 fraction value, e.g. 0.11 m, below Mist Start) makes the depth
-    # factor 0 everywhere and fog vanishes completely.
-    ramp_black = vfx.ramp_black
-    ramp_white = vfx.ramp_white
+    _remove_vfx_nodes(nt, "VFX_BLUR", "VFX_BLURRAMP", "VFX_BLURMATH")    # Fog ramp: user values are METERS from the camera. Mist pixels carry a
+    # 0..1 fraction of the mist window (mist_start .. mist_start + mist_depth).
+    # Convert here, in Python, and heal any garbage left from the old 0..1
+    # system BEFORE it can reach the nodes - a broken range (e.g. Full =
+    # 0.11 m < Mist Start 2.24 m) used to pin the factor at 1 (flat gray
+    # silhouettes) or 0 (no fog at all).
+    mist_s = max(0.0, float(vfx.mist_start))
+    mist_d = max(0.1, float(vfx.mist_depth))
+    ramp_black = max(0.0, float(vfx.ramp_black))
+    ramp_white = float(vfx.ramp_white)
+    if ramp_white <= 1.0 + 1e-6 and ramp_white <= ramp_black + 0.01:
+        # stale fraction from the old system (e.g. 0.11 or 1.0) -> meters
+        ramp_white = mist_s + 0.5 * mist_d
+        print(f"VFX: stale fog 'Fog Full' value converted to {ramp_white:.1f} m")
     if ramp_white <= ramp_black + 0.01:
-        ramp_white = max(ramp_black + max(1.0, 0.2 * vfx.mist_depth),
-                         vfx.mist_start + 0.5 * vfx.mist_depth)
-        print(f"VFX: healed degenerate fog ramp "
-              f"(Full {ramp_white:.2f} m was <= Start {ramp_black:.2f} m)")
+        ramp_white = ramp_black + max(1.0, 0.5 * mist_d)
+        print(f"VFX: healed fog ramp (Full raised to {ramp_white:.1f} m)")
+    # meters -> mist fraction, clamped into the mist window
+    frac_black = min(1.0, max(0.0, (ramp_black - mist_s) / mist_d))
+    frac_white = min(1.0, max(0.0, (ramp_white - mist_s) / mist_d))
+    if frac_white - frac_black < 0.02:
+        frac_white = min(1.0, frac_black + 0.02)
+    if getattr(vfx, "use_fog", False):
+        print(f"[VFX fog] ramp: {ramp_black:.1f}..{ramp_white:.1f} m "
+              f"-> mist {frac_black:.2f}..{frac_white:.2f} "
+              f"(window {mist_s:.1f}..{mist_s + mist_d:.1f} m)")
     for node in list(nt.nodes):
         if node.type == 'CRYPTOMATTE' and node.name != "VFX_CRYPTO_PICK":
             nt.nodes.remove(node)
@@ -1340,10 +1328,8 @@ def build_comp_assembly(vfx, master, nt=None):
                     relink(sm, mist)
 
                 for name, val in (("Strength", vfx.fog_strength),
-                                  ("Mist Start", vfx.mist_start),
-                                  ("Mist Depth", vfx.mist_depth),
-                                  ("Ramp Black", ramp_black),
-                                  ("Ramp White", ramp_white),
+                                  ("Ramp Black", frac_black),
+                                  ("Ramp White", frac_white),
                                   ("F_BG", vfx.bg_fog_factor if getattr(vfx, "bg_fog_factor", 0.0) > 0.0 else 0.0)):
                     s = gi(name)
                     if s is not None:
