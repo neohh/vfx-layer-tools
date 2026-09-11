@@ -1245,6 +1245,17 @@ def build_comp_assembly(vfx, master, nt=None):
     _cleanup_fog_nodes(nt)
     _cleanup_mask_nodes(nt)
     _remove_vfx_nodes(nt, "VFX_BLUR", "VFX_BLURRAMP", "VFX_BLURMATH")
+
+    # Heal a degenerate fog ramp: "Fog Full" at or below "Fog Start" (a stale
+    # 0..1 fraction value, e.g. 0.11 m, below Mist Start) makes the depth
+    # factor 0 everywhere and fog vanishes completely.
+    ramp_black = vfx.ramp_black
+    ramp_white = vfx.ramp_white
+    if ramp_white <= ramp_black + 0.01:
+        ramp_white = max(ramp_black + max(1.0, 0.2 * vfx.mist_depth),
+                         vfx.mist_start + 0.5 * vfx.mist_depth)
+        print(f"VFX: healed degenerate fog ramp "
+              f"(Full {ramp_white:.2f} m was <= Start {ramp_black:.2f} m)")
     for node in list(nt.nodes):
         if node.type == 'CRYPTOMATTE' and node.name != "VFX_CRYPTO_PICK":
             nt.nodes.remove(node)
@@ -1331,8 +1342,8 @@ def build_comp_assembly(vfx, master, nt=None):
                 for name, val in (("Strength", vfx.fog_strength),
                                   ("Mist Start", vfx.mist_start),
                                   ("Mist Depth", vfx.mist_depth),
-                                  ("Ramp Black", vfx.ramp_black),
-                                  ("Ramp White", vfx.ramp_white),
+                                  ("Ramp Black", ramp_black),
+                                  ("Ramp White", ramp_white),
                                   ("F_BG", vfx.bg_fog_factor if getattr(vfx, "bg_fog_factor", 0.0) > 0.0 else 0.0)):
                     s = gi(name)
                     if s is not None:

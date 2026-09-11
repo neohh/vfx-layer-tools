@@ -1,14 +1,14 @@
 bl_info = {
     "name": "VFX Layer Tools",
     "author": "VFX Pipeline",
-    "version": (3, 4, 0),
+    "version": (3, 4, 1),
     "blender": (5, 2, 1),
     "location": "View3D > Sidebar > VFX",
     "description": "VFX layer / scene / compositing manager",
     "category": "Compositing",
 }
 
-VFX_VERSION = "3.4.0"
+VFX_VERSION = "3.4.1"
 
 import bpy
 import importlib
@@ -952,20 +952,22 @@ def register():
         print(f"VFX register ERROR: could not create Scene.vfx: {exc}")
 
     # One-time migration: old ramp values were mist fractions (0..1),
-    # new ones are meters. Old default white=0.11 would mean 0.11 m of fog.
-    try:
-        for sc in bpy.data.scenes:
+    # new ones are meters. A stale 0.11 m "Fog Full" sits below Mist Start
+    # and kills all fog. Per-scene try: one unwritable (linked) scene
+    # must not abort the loop for the rest.
+    for sc in bpy.data.scenes:
+        try:
             v = getattr(sc, "vfx", None)
-            if v is None:
+            if v is None or v.get("vfx_ramp_migrated"):
                 continue
-            if not v.get("vfx_ramp_migrated"):
-                if 0.0 < v.ramp_white <= 1.0:
-                    v.ramp_white = 30.0
-                if 0.0 < v.ramp_black <= 1.0 and v.ramp_black < v.ramp_white * 0.01:
-                    pass  # black 0..1 in meters is still valid (0..1 m)
-                v["vfx_ramp_migrated"] = True
-    except Exception:
-        pass
+            if v.ramp_white <= 1.0:
+                v.ramp_white = 30.0
+                print(f"VFX: migrated Fog Full 0..1 fraction to meters in '{sc.name}'")
+            if v.ramp_black > v.ramp_white:
+                v.ramp_black = 0.0
+            v["vfx_ramp_migrated"] = True
+        except Exception:
+            continue
 
     # kick off auto-reload timer
     if _AUTO_RELOAD_ENABLED:
