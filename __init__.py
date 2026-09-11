@@ -1,14 +1,14 @@
 bl_info = {
     "name": "VFX Layer Tools",
     "author": "VFX Pipeline",
-    "version": (3, 3, 1),
+    "version": (3, 4, 0),
     "blender": (5, 2, 1),
     "location": "View3D > Sidebar > VFX",
     "description": "VFX layer / scene / compositing manager",
     "category": "Compositing",
 }
 
-VFX_VERSION = "3.3.1"
+VFX_VERSION = "3.4.0"
 
 import bpy
 import importlib
@@ -371,12 +371,32 @@ class VFXProject(bpy.types.PropertyGroup):
         update=lambda s, c: _trigger_comp(c)
     )
     ramp_black: FloatProperty(
-        name="Ramp Black", default=0.0, min=0.0, max=1.0,
+        name="Fog Start (m)", default=0.0, min=0.0, max=10000.0,
+        unit='LENGTH',
+        description="Distance from camera where fog starts (meters)",
         update=lambda s, c: _trigger_comp(c)
     )
     ramp_white: FloatProperty(
-        name="Ramp White", default=1.0, min=0.0, max=1.0,
+        name="Fog Full (m)", default=30.0, min=0.0, max=10000.0,
+        unit='LENGTH',
+        description="Distance where fog reaches full density (meters)",
         update=lambda s, c: _trigger_comp(c)
+    )
+    comp_order_expanded: BoolProperty(
+        name="Composite order expanded",
+        description="Show the computed compositing order",
+        default=False
+    )
+    fx_mode: EnumProperty(
+        name="Per-layer FX",
+        items=(
+            ('FOG', "Fog", "Per-layer fog density"),
+            ('GRADE', "Grade", "Per-layer color grading"),
+            ('SHADOW', "Shadow pass", "Shadow catcher settings"),
+            ('ADJUST', "Lighting adjust", "Material exposure/contrast adjust"),
+        ),
+        default='FOG',
+        description="Which per-layer effect settings to show"
     )
     fog_mask_source: EnumProperty(
         name="Fog Mask Source",
@@ -468,8 +488,9 @@ class VFXProject(bpy.types.PropertyGroup):
         default=False
     )
     bg_fog_factor: FloatProperty(
-        name="BG Fog", default=1.0, min=0.0, max=2.0,
-        description="Fog amount on the background layer",
+        name="BG Fog", default=0.0, min=0.0, max=2.0,
+        description="Haze on the background/world (0 = off). The sky has no "
+                    "depth map, so a high value just paints flat fog color",
         update=lambda s, c: _trigger_comp(c)
     )
     use_glare: BoolProperty(
@@ -929,6 +950,22 @@ def register():
         print("VFX: Scene.vfx created")
     except Exception as exc:
         print(f"VFX register ERROR: could not create Scene.vfx: {exc}")
+
+    # One-time migration: old ramp values were mist fractions (0..1),
+    # new ones are meters. Old default white=0.11 would mean 0.11 m of fog.
+    try:
+        for sc in bpy.data.scenes:
+            v = getattr(sc, "vfx", None)
+            if v is None:
+                continue
+            if not v.get("vfx_ramp_migrated"):
+                if 0.0 < v.ramp_white <= 1.0:
+                    v.ramp_white = 30.0
+                if 0.0 < v.ramp_black <= 1.0 and v.ramp_black < v.ramp_white * 0.01:
+                    pass  # black 0..1 in meters is still valid (0..1 m)
+                v["vfx_ramp_migrated"] = True
+    except Exception:
+        pass
 
     # kick off auto-reload timer
     if _AUTO_RELOAD_ENABLED:

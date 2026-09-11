@@ -128,16 +128,21 @@ def _draw_layer_list(context, layout):
 
         box.prop(layer, "shadow_catcher", text="Catcher")
 
-        row = box.row(align=True)
-        if not layer.shadow_scene:
-            row.operator("vfx.create_shadow_pass", icon='LIGHT')
-        else:
-            row.label(text=f"Shadow pass: {layer.shadow_mode}", icon='CHECKMARK')
-            row.operator("vfx.refresh_proxies", text="", icon='FILE_REFRESH')
-            row.operator("vfx.delete_shadow_pass", text="", icon='X')
-            box.prop(layer, "shadow_strength")
+        # ── PER-LAYER EFFECTS: one visible section at a time ──
+        box.prop(vfx, "fx_mode", text="FX")
+        fx = vfx.fx_mode
 
-        if vfx.use_fog:
+        if fx == 'SHADOW':
+            srow = box.row(align=True)
+            if not layer.shadow_scene:
+                srow.operator("vfx.create_shadow_pass", icon='LIGHT')
+            else:
+                srow.label(text=f"Shadow pass: {layer.shadow_mode}", icon='CHECKMARK')
+                srow.operator("vfx.refresh_proxies", text="", icon='FILE_REFRESH')
+                srow.operator("vfx.delete_shadow_pass", text="", icon='X')
+                box.prop(layer, "shadow_strength")
+
+        if fx == 'FOG' and vfx.use_fog:
             box.prop(layer, "fog_factor")
 
         # ── OCCLUSION (holdout) ──
@@ -175,60 +180,62 @@ def _draw_layer_list(context, layout):
             oc.label(text=f"Holdout proxies: {n_prox}", icon='MOD_MESHDEFORM')
 
         box.separator()
-        box.prop(layer, "use_adjust")
-        if layer.use_adjust:
-            st = _last_adjust_stats
-            if st["notes"]:
-                for n in st["notes"]:
-                    box.label(text=n, icon='ERROR')
-            else:
-                box.label(text=f"{st['applied']}/{st['materials']} materials adjusted", icon='CHECKMARK')
-            adj = box.column(align=True)
-            adj.prop(layer, "exposure")
-            adj.prop(layer, "contrast")
-            adj.prop(layer, "saturation")
-            adj.prop(layer, "tint_strength")
-            if layer.tint_strength > 0.0:
-                adj.prop(layer, "tint_color", text="")
-            adj.operator("vfx.reset_lighting", icon='LOOP_BACK')
+        if fx == 'ADJUST':
+            box.prop(layer, "use_adjust")
+            if layer.use_adjust:
+                st = _last_adjust_stats
+                if st["notes"]:
+                    for n in st["notes"]:
+                        box.label(text=n, icon='ERROR')
+                else:
+                    box.label(text=f"{st['applied']}/{st['materials']} materials adjusted", icon='CHECKMARK')
+                adj = box.column(align=True)
+                adj.prop(layer, "exposure")
+                adj.prop(layer, "contrast")
+                adj.prop(layer, "saturation")
+                adj.prop(layer, "tint_strength")
+                if layer.tint_strength > 0.0:
+                    adj.prop(layer, "tint_color", text="")
+                adj.operator("vfx.reset_lighting", icon='LOOP_BACK')
 
         # ── Per-layer GRADE ──
-        box.separator()
-        gbox = box.box()
-        gr = gbox.row(align=True)
-        gr.prop(layer, "grade_enable", text="")
-        gr.label(text="GRADE", icon='COLOR')
-        if layer.grade_enable:
-            gc = gbox.column(align=True)
-            gc.prop(layer, "l_exposure")
-            gc.prop(layer, "l_temp")
-            gc.prop(layer, "l_tint")
-            gc.prop(layer, "l_sat")
-            gc.prop(layer, "l_contrast")
-            row_lgg = gc.row(align=True)
-            row_lgg.prop(layer, "l_lift", text="Lift")
-            row_lgg.prop(layer, "l_gain", text="Gain")
-            gbox.operator("vfx.reset_layer_grade", icon='LOOP_BACK')
-            # MASK for per-layer grade (default: alpha silhouette)
-            lam = gc.row(align=True)
-            lam.prop(layer, "use_alpha_mask", icon='MOD_MASK')
-            if not layer.use_alpha_mask:
-                gc.prop(layer, "grade_mask_source", text="Mask")
-                if layer.grade_mask_source == 'DEPTH':
-                    lr = gc.row(align=True)
-                    lr.prop(layer, "grade_mask_depth_start")
-                    lr.prop(layer, "grade_mask_depth_end")
-                elif layer.grade_mask_source == 'LUMA':
-                    lr = gc.row(align=True)
-                    lr.prop(layer, "grade_mask_luma_lo")
-                    lr.prop(layer, "grade_mask_luma_hi")
-                elif layer.grade_mask_source == 'EXT':
-                    gc.prop(layer, "grade_mask_ext_node")
-                    pk = gc.operator("vfx.pick_cryptomatte", text="Pick Object (pipette)", icon='EYEDROPPER')
-                    pk.target = 'LAYER'
-                r3 = gc.row(align=True)
-                r3.prop(layer, "grade_mask_invert")
-                r3.prop(layer, "grade_mask_soft")
+        if fx == 'GRADE':
+            box.separator()
+            gbox = box.box()
+            gr = gbox.row(align=True)
+            gr.prop(layer, "grade_enable", text="")
+            gr.label(text="GRADE", icon='COLOR')
+            if layer.grade_enable:
+                gc = gbox.column(align=True)
+                gc.prop(layer, "l_exposure")
+                gc.prop(layer, "l_temp")
+                gc.prop(layer, "l_tint")
+                gc.prop(layer, "l_sat")
+                gc.prop(layer, "l_contrast")
+                row_lgg = gc.row(align=True)
+                row_lgg.prop(layer, "l_lift", text="Lift")
+                row_lgg.prop(layer, "l_gain", text="Gain")
+                gbox.operator("vfx.reset_layer_grade", icon='LOOP_BACK')
+                # MASK for per-layer grade (default: alpha silhouette)
+                lam = gc.row(align=True)
+                lam.prop(layer, "use_alpha_mask", icon='MOD_MASK')
+                if not layer.use_alpha_mask:
+                    gc.prop(layer, "grade_mask_source", text="Mask")
+                    if layer.grade_mask_source == 'DEPTH':
+                        lr = gc.row(align=True)
+                        lr.prop(layer, "grade_mask_depth_start")
+                        lr.prop(layer, "grade_mask_depth_end")
+                    elif layer.grade_mask_source == 'LUMA':
+                        lr = gc.row(align=True)
+                        lr.prop(layer, "grade_mask_luma_lo")
+                        lr.prop(layer, "grade_mask_luma_hi")
+                    elif layer.grade_mask_source == 'EXT':
+                        gc.prop(layer, "grade_mask_ext_node")
+                        pk = gc.operator("vfx.pick_cryptomatte", text="Pick Object (pipette)", icon='EYEDROPPER')
+                        pk.target = 'LAYER'
+                    r3 = gc.row(align=True)
+                    r3.prop(layer, "grade_mask_invert")
+                    r3.prop(layer, "grade_mask_soft")
 
 
 def _draw_mask_section(context, layout, vfx, prefix, sources):
@@ -300,6 +307,7 @@ def _draw_post_effects(context, layout):
         fb.prop(vfx, "fog_strength")
         if vfx.fog_strength > 0.0:
             fb.prop(vfx, "fog_color", text="")
+        fb.prop(vfx, "bg_fog_factor")
         _draw_mask_section(context, fb, vfx, "fog", ('DEPTH', 'LUMA', 'EXT'))
     dofbox = layout.box()
     dh = dofbox.row(align=True)
@@ -386,8 +394,13 @@ def _draw_composite_order(context, layout):
     vfx, master = get_project(context, allow_write=False)
 
     cbox = layout.box()
-    cbox.label(text="COMPOSITING ORDER", icon='SORTSIZE')
-    cbox.prop(vfx, "composite_sort_mode", text="Sort")
+    head = cbox.row(align=True)
+    head.prop(vfx, "comp_order_expanded", text="", emboss=False,
+              icon='TRIA_DOWN' if vfx.comp_order_expanded else 'TRIA_RIGHT')
+    head.label(text="COMPOSITING ORDER", icon='SORTSIZE')
+    head.prop(vfx, "composite_sort_mode", text="")
+    if not vfx.comp_order_expanded:
+        return
     seq = compute_composite_order(vfx, master, verbose=False)
     col = cbox.column(align=True)
     col.label(text="bottom -> top:", icon='TRIA_DOWN')
@@ -402,11 +415,10 @@ def _draw_composite_order(context, layout):
 
 
 def _draw_render_settings(context, layout):
-    """Shared: render engines, output, rebuild buttons."""
+    """Shared: render/output first (primary workflow), then engines/rebuild."""
     vfx, master = get_project(context, allow_write=False)
 
     layout.separator()
-    _draw_composite_order(context, layout)
     layout.prop(vfx, "output_dir", text="Output")
 
     layout.operator(
@@ -421,6 +433,8 @@ def _draw_render_settings(context, layout):
         bar.prop(vfx, "render_progress", slider=True, text="")
         layout.label(text=vfx.render_status, icon='RENDER_ANIMATION')
         layout.label(text="ESC - stop render", icon='INFO')
+
+    _draw_composite_order(context, layout)
 
     layout.separator(factor=1.5)
 

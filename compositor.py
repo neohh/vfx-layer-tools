@@ -1017,7 +1017,7 @@ def _fog_mix_node(ng, loc):
             mix.outputs[0] if len(mix.outputs) else None)
 
 
-def _build_fog_group2(vfx, has_bg=True, order=None):
+def _build_fog_group2(vfx, has_bg=True, order=None, bg_fog=False):
     ng = bpy.data.node_groups.get("VFX_FogGroup")
     if ng is None:
         ng = bpy.data.node_groups.new("VFX_FogGroup", 'CompositorNodeTree')
@@ -1031,6 +1031,8 @@ def _build_fog_group2(vfx, has_bg=True, order=None):
             pass
 
     ng.interface.new_socket("Mist", in_out='INPUT', socket_type='NodeSocketColor')
+    ng.interface.new_socket("Mist Start", in_out='INPUT', socket_type='NodeSocketFloat')
+    ng.interface.new_socket("Mist Depth", in_out='INPUT', socket_type='NodeSocketFloat')
     ng.interface.new_socket("Strength", in_out='INPUT', socket_type='NodeSocketFloat')
     ng.interface.new_socket("Extra Mask", in_out='INPUT', socket_type='NodeSocketFloat')
     ng.interface.new_socket("Fog Color", in_out='INPUT', socket_type='NodeSocketColor')
@@ -1087,8 +1089,36 @@ def _build_fog_group2(vfx, has_bg=True, order=None):
     except Exception:
         pass
     ng.links.new(g_in("Mist"), mr.inputs.get("Value"))
-    ng.links.new(g_in("Ramp Black"), mr.inputs.get("From Min"))
-    ng.links.new(g_in("Ramp White"), mr.inputs.get("From Max"))
+    # Ramp props are in METERS, the mist pass is a 0..1 fraction:
+    # fraction = (dist - mist_start) / mist_depth, clamped to [0, 1].
+    converted = False
+    for sock_name, target, dy in (("Ramp Black", "From Min", 480),
+                                  ("Ramp White", "From Max", 320)):
+        sub = math_node('SUBTRACT', (-1080, dy))
+        div = math_node('DIVIDE', (-960, dy))
+        clamp = math_node('MAXIMUM', (-860, dy))
+        if sub is None or div is None:
+            continue
+        ng.links.new(g_in(sock_name), sub.inputs[0])
+        st = g_in("Mist Start")
+        if st is not None:
+            ng.links.new(st, sub.inputs[1])
+        ng.links.new(sub.outputs[0], div.inputs[0])
+        dp = g_in("Mist Depth")
+        if dp is not None:
+            ng.links.new(dp, div.inputs[1])
+        res = div.outputs[0]
+        if clamp is not None:
+            ng.links.new(div.outputs[0], clamp.inputs[0])
+            clamp.inputs[1].default_value = 0.0
+            res = clamp.outputs[0]
+        out_sock = mr.inputs.get(target)
+        if out_sock is not None:
+            ng.links.new(res, out_sock)
+            converted = True
+    if not converted:
+        ng.links.new(g_in("Ramp Black"), mr.inputs.get("From Min"))
+        ng.links.new(g_in("Ramp White"), mr.inputs.get("From Max"))
     mstr = math_node('MULTIPLY', (-550, 300))
     if mstr is None:
         return ng, meta
@@ -1156,7 +1186,13 @@ def _build_fog_group2(vfx, has_bg=True, order=None):
     y = 700
     cur = None
     if has_bg:
-        cur = fogged(g_in("BG Image"), g_in("F_BG"), None, y)
+        fbg = g_in("F_BG")
+        # BG has no depth: only fog it when the user explicitly asks for haze,
+        # otherwise pass the background through untouched.
+        if bg_fog and fbg is not None:
+            cur = fogged(g_in("BG Image"), fbg, None, y)
+        else:
+            cur = g_in("BG Image")
         y -= 250
 
     for entry in meta:
@@ -1260,8 +1296,9 @@ def build_comp_assembly(vfx, master, nt=None):
             _ensure_fogmap(nt, vfx, master)
             mist = _get_mist_socket(nt)
             if mist is not None:
-                ng, meta = _build_fog_group2(vfx, has_bg=bg_sock is not None,
-                                             order=order)
+                ng, meta = _build_fog_group2(
+                    vfx, has_bg=bg_sock is not None, order=order,
+                    bg_fog=(getattr(vfx, "bg_fog_factor", 0.0) > 0.0))
                 gnode = nt.nodes.get("VFX_FOG_GROUP")
                 if gnode is None:
                     gnode = None
@@ -1292,9 +1329,11 @@ def build_comp_assembly(vfx, master, nt=None):
                     relink(sm, mist)
 
                 for name, val in (("Strength", vfx.fog_strength),
+                                  ("Mist Start", vfx.mist_start),
+                                  ("Mist Depth", vfx.mist_depth),
                                   ("Ramp Black", vfx.ramp_black),
                                   ("Ramp White", vfx.ramp_white),
-                                  ("F_BG", vfx.bg_fog_factor)):
+                                  ("F_BG", vfx.bg_fog_factor if getattr(vfx, "bg_fog_factor", 0.0) > 0.0 else 0.0)):
                     s = gi(name)
                     if s is not None:
                         s.default_value = val
