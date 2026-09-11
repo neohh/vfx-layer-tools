@@ -233,6 +233,9 @@ def _draw_mask_section(context, layout, vfx, prefix, sources):
 
 def _draw_post_effects(context, layout):
     """Shared: draw all post-processing effects (fog, blur, DOF, glare, lensdist)."""
+    if not hasattr(context.scene, "vfx"):
+        layout.label(text="Scene.vfx not registered — restart Blender", icon='ERROR')
+        return
     vfx, master = get_project(context, allow_write=False)
 
     # ── Mask toggle + selector (top bar) ──
@@ -387,13 +390,12 @@ class VFX_PT_main(bpy.types.Panel):
         layout = self.layout
 
         if not hasattr(context.scene, "vfx"):
-            layout.label(text="VFX props not registered!", icon='ERROR')
-            layout.label(text="Remove old addon, restart Blender")
+            layout.label(text="Scene.vfx not registered — restart Blender", icon='ERROR')
             return
 
         try:
             vfx, master = get_project(context, allow_write=False)
-            layout.label(text=f"VFX Layer Tools v{VFX_VERSION}", icon='NODETREE')
+            layout.label(text=f"VFX Layer Tools build {VFX_VERSION}", icon='NODETREE')
             layout.separator()
             layout.prop(vfx, "master_scene", text="Master")
 
@@ -411,7 +413,7 @@ class VFX_PT_main(bpy.types.Panel):
     def draw_main(self, context, layout):
         try:
             vfx, master = get_project(context, allow_write=False)
-            layout.label(text=f"VFX Layer Tools v{VFX_VERSION}", icon='NODETREE')
+            layout.label(text=f"VFX Layer Tools build {VFX_VERSION}", icon='NODETREE')
             layout.separator()
             layout.prop(vfx, "master_scene", text="Master")
 
@@ -439,9 +441,11 @@ class VFX_PT_post_effects(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        if not hasattr(context.scene, "vfx"):
-            return
         try:
+            layout.label(text=f"build {VFX_VERSION}", icon='INFO')
+            if not hasattr(context.scene, "vfx"):
+                layout.label(text="Scene.vfx not registered — restart Blender", icon='ERROR')
+                return
             _draw_post_effects(context, layout)
         except Exception as e:
             layout.label(text="Panel draw error:", icon='ERROR')
@@ -467,7 +471,7 @@ class VFX_PT_compositor(bpy.types.Panel):
         layout = self.layout
 
         if not hasattr(context.scene, "vfx"):
-            layout.label(text="VFX props not registered!", icon='ERROR')
+            layout.label(text="Scene.vfx not registered — restart Blender", icon='ERROR')
             return
 
         try:
@@ -495,10 +499,46 @@ class VFX_PT_compositor_effects(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        if not hasattr(context.scene, "vfx"):
-            return
         try:
+            layout.label(text=f"build {VFX_VERSION}", icon='INFO')
+            if not hasattr(context.scene, "vfx"):
+                layout.label(text="Scene.vfx not registered — restart Blender", icon='ERROR')
+                return
             _draw_post_effects(context, layout)
         except Exception as e:
             layout.label(text="Panel draw error:", icon='ERROR')
             layout.label(text=str(e))
+
+
+# ---------------------------------------------------------------------
+# PANEL — DEBUG / TEST (View3D sidebar)
+# Простая тестовая панель: если она рисуется — аддон загружен и RNA в порядке.
+# ---------------------------------------------------------------------
+
+class VFX_PT_debug_test(bpy.types.Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "VFX"
+    bl_label = "Debug / Test"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text=f"Build {VFX_VERSION}", icon='SEQ_CHROMA_SCOPE')
+
+        box = layout.box()
+        box.label(text="Smoke test", icon='CHECKMARK')
+        col = box.column(align=True)
+        col.operator("vfx.diagnostic", text="Run Diagnostics", icon='SYSTEM')
+        col.operator("vfx.rebuild_comp", text="Rebuild Comp", icon='NODE_COMPOSITING')
+
+        info = layout.box()
+        vfx_ok = hasattr(context.scene, "vfx")
+        info.label(text=f"Scene.vfx: {'OK' if vfx_ok else 'MISSING'}",
+                   icon='CHECKMARK' if vfx_ok else 'ERROR')
+        try:
+            import sys as _sys
+            mods = [m for m in _sys.modules if m.startswith("vfx_layer_tools")]
+            info.label(text=f"modules loaded: {len(mods)}")
+        except Exception:
+            pass

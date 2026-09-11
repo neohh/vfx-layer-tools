@@ -1,14 +1,14 @@
 bl_info = {
     "name": "VFX Layer Tools",
     "author": "VFX Pipeline",
-    "version": (3, 1, 0),
+    "version": (3, 2, 1),
     "blender": (5, 2, 1),
     "location": "View3D > Sidebar > VFX",
     "description": "VFX layer / scene / compositing manager",
     "category": "Compositing",
 }
 
-VFX_VERSION = "3.1.0"
+VFX_VERSION = "3.2.1"
 
 import bpy
 import importlib
@@ -101,6 +101,9 @@ def _engine_items_cycles_first(self, context):
 
 # ---------------------------------------------------------------------
 # MASK SOURCE ITEMS (shared by all masked effects)
+# NOTE: must be a static tuple, NOT an items-callback function.
+# EnumProperty(items=<function>) requires default to be an int index;
+# string defaults like 'NONE' only work with a static items tuple.
 # ---------------------------------------------------------------------
 
 _MASK_SOURCE_ITEMS = (
@@ -110,10 +113,6 @@ _MASK_SOURCE_ITEMS = (
     ('DEPTH', "Depth", "Mask by depth (start/end in meters)"),
     ('LUMA', "Luma", "Mask by brightness (lo/hi)"),
 )
-
-
-def _mask_source_items(self, context):
-    return _MASK_SOURCE_ITEMS
 
 
 # ---------------------------------------------------------------------
@@ -186,7 +185,7 @@ class VFXLayer(bpy.types.PropertyGroup):
     )
     grade_mask_source: EnumProperty(
         name="Grade Mask Source",
-        items=_mask_source_items,
+        items=_MASK_SOURCE_ITEMS,
         default='NONE',
         update=lambda self, ctx: _trigger_comp(ctx)
     )
@@ -345,7 +344,7 @@ class VFXProject(bpy.types.PropertyGroup):
     )
     fog_mask_source: EnumProperty(
         name="Fog Mask Source",
-        items=_mask_source_items,
+        items=_MASK_SOURCE_ITEMS,
         default='NONE',
         update=lambda s, c: _trigger_comp(c)
     )
@@ -469,7 +468,7 @@ class VFXProject(bpy.types.PropertyGroup):
     )
     glare_mask_source: EnumProperty(
         name="Glare Mask Source",
-        items=_mask_source_items,
+        items=_MASK_SOURCE_ITEMS,
         default='NONE',
         update=lambda s, c: _trigger_comp(c)
     )
@@ -533,7 +532,7 @@ class VFXProject(bpy.types.PropertyGroup):
     )
     dof_mask_source: EnumProperty(
         name="DOF Mask Source",
-        items=_mask_source_items,
+        items=_MASK_SOURCE_ITEMS,
         default='NONE',
         update=lambda s, c: _trigger_comp(c)
     )
@@ -582,7 +581,7 @@ class VFXProject(bpy.types.PropertyGroup):
     )
     grade_mask_source: EnumProperty(
         name="Grade Mask Source",
-        items=_mask_source_items,
+        items=_MASK_SOURCE_ITEMS,
         default='NONE',
         update=lambda s, c: _trigger_comp(c)
     )
@@ -687,6 +686,7 @@ from .operators import (
 from .ui import (
     VFX_UL_layers, VFX_PT_main, VFX_PT_post_effects,
     VFX_PT_compositor, VFX_PT_compositor_effects,
+    VFX_PT_debug_test,
 )
 from .colormatch import get_or_create_color_match_group, apply_preset
 from .lightgroups import (
@@ -735,6 +735,7 @@ classes = (
     VFX_PT_post_effects,
     VFX_PT_compositor,
     VFX_PT_compositor_effects,
+    VFX_PT_debug_test,
 )
 
 CLASS_NAMES = tuple(cls.__name__ for cls in classes)
@@ -813,7 +814,21 @@ def unregister():
         except Exception:
             pass
 
-    for name in CLASS_NAMES:
+    for name in set(CLASS_NAMES):
+        old = getattr(bpy.types, name, None)
+        if old is not None:
+            try:
+                bpy.utils.unregister_class(old)
+            except Exception:
+                pass
+
+    # Sweep orphaned VFX_* registrations left over from failed load attempts
+    # (e.g. "already registered as a subclass" after a partial registration)
+    orphans = [
+        n for n in dir(bpy.types)
+        if n.startswith(("VFX_OT_", "VFX_PT_", "VFX_UL_", "VFXLayer", "VFXProject"))
+    ]
+    for name in orphans:
         old = getattr(bpy.types, name, None)
         if old is not None:
             try:
@@ -822,18 +837,55 @@ def unregister():
                 pass
 
 
+def _purge_stale_modules():
+    """Drop leftover copies of this addon (old folder / old zips) from sys.modules."""
+    for name in list(sys.modules):
+        if name != __name__ and (name == "vfx_layer_tools" or name.startswith("vfx_layer_tools.")):
+            try:
+                del sys.modules[name]
+                print(f"VFX register: purged stale module '{name}'")
+            except Exception:
+                pass
+
+
 def register():
-    print(f"VFX register() called, {len(classes)} classes to register")
+    print("=" * 66)
+    print(f"VFX Layer Tools v{VFX_VERSION} | register from: {os.path.dirname(__file__)}")
+    print("=" * 66)
     unregister()
+
+    _purge_stale_modules()
 
     for cls in classes:
         try:
             bpy.utils.register_class(cls)
         except Exception as exc:
-            print(f"VFX register ERROR {cls.__name__}: {exc}")
+            # Probably a stale RNA class with the same name is still registered:
+            # unregister it and retry once.
+            replaced = False
+            old = getattr(bpy.types, cls.__name__, None)
+            if old is not None:
+                try:
+                    bpy.utils.unregister_class(old)
+                    bpy.utils.register_class(cls)
+                    replaced = True
+                    print(f"VFX register: replaced stale class {cls.__name__}")
+                except Exception as exc2:
+                    print(f"VFX register ERROR {cls.__name__}: retry failed: {exc2}")
+            if not replaced:
+                print(f"VFX register ERROR {cls.__name__}: {exc}")
 
-    bpy.types.Scene.vfx = PointerProperty(type=VFXProject)
-    print("VFX: Scene.vfx created")
+    # Scene.vfx: kill any stale pointer (old build / foreign addon) and recreate
+    if hasattr(bpy.types.Scene, "vfx"):
+        try:
+            del bpy.types.Scene.vfx
+        except Exception:
+            pass
+    try:
+        bpy.types.Scene.vfx = PointerProperty(type=VFXProject)
+        print("VFX: Scene.vfx created")
+    except Exception as exc:
+        print(f"VFX register ERROR: could not create Scene.vfx: {exc}")
 
     # kick off auto-reload timer
     if _AUTO_RELOAD_ENABLED:
