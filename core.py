@@ -46,6 +46,30 @@ def collect_objects(objects, include_children=False):
     return result
 
 
+def ensure_parent_empties(collection, objects):
+    """Link the EMPTY parent chain of objects into collection.
+
+    A layer scene is a separate scene: if a child is linked without its
+    parent Empty, the depsgraph evaluates the child WITHOUT the parent
+    transform -> wrong position AND size (parent scale is lost). Empties
+    never render, so linking them is always safe.
+    """
+    added = 0
+    for obj in objects:
+        node = obj.parent
+        while node is not None:
+            if node.type != 'EMPTY':
+                break  # non-empty parents are handled via proxies/warnings
+            if collection.objects.get(node.name) is None:
+                try:
+                    collection.objects.link(node)
+                    added += 1
+                except Exception:
+                    pass
+            node = node.parent
+    return added
+
+
 def default_layer_name(context):
     obj = context.active_object
     if obj is None and context.selected_objects:

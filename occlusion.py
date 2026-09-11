@@ -13,7 +13,8 @@ never linked into the FOGMAP scene).
 import bpy
 from mathutils import Vector
 
-from .core import ensure_root, link_collection_to_scene, exclude_collection_in_master
+from .core import (ensure_root, link_collection_to_scene,
+                   exclude_collection_in_master, ensure_parent_empties)
 
 DRAWABLE = {'MESH', 'CURVE', 'VOLUME', 'SURFACE', 'META'}
 PROXY_SUFFIX = "_VFXHoldout"
@@ -64,7 +65,7 @@ def _make_holdout_proxy(obj, layer_id, col):
     name = obj.name + PROXY_SUFFIX
     existing = col.objects.get(name)
     if existing is not None and existing.get("vfx_proxy") == layer_id:
-        # reuse by name — refresh state, don't duplicate
+        # reuse by name — refresh mesh, visibility AND transform, don't duplicate
         if getattr(obj, "data", None):
             try:
                 existing.data = obj.data  # follow source mesh swaps
@@ -73,6 +74,19 @@ def _make_holdout_proxy(obj, layer_id, col):
         try:
             existing.hide_render = False
             existing.hide_viewport = False
+        except Exception:
+            pass
+        try:
+            # if the parent EMPTY chain is present in this collection, keep
+            # live parenting so empty animation/constrains still drive it
+            if obj.parent is not None and obj.parent.type == 'EMPTY' \
+                    and obj.parent.name in col.objects:
+                existing.parent = obj.parent
+                existing.matrix_parent_inverse = obj.matrix_parent_inverse.copy()
+                existing.matrix_basis = obj.matrix_basis.copy()
+            else:
+                existing.parent = None
+                existing.matrix_basis = obj.matrix_world.copy()
         except Exception:
             pass
         set_holdout(existing)
@@ -89,8 +103,9 @@ def _make_holdout_proxy(obj, layer_id, col):
     except Exception:
         pass
 
-    # keep parenting: EMPTY chains are linked directly, other parents are
-    # baked into a world matrix (same approach as shadow proxies)
+    # keep parenting: when the full EMPTY chain is (or will be) in this
+    # collection, parent the proxy to the SAME empty — live transform.
+    # Otherwise bake the world matrix once.
     chain = []
     node = obj.parent
     ok_chain = True
@@ -105,8 +120,11 @@ def _make_holdout_proxy(obj, layer_id, col):
         proxy.parent = None
         proxy.matrix_parent_inverse.identity()
         if obj.parent is not None:
-            proxy.matrix_basis = obj.parent.matrix_world @ \
-                obj.matrix_parent_inverse @ obj.matrix_basis
+            # parent the proxy to the same Empty and copy the child's
+            # local state -> proxy follows the empty exactly like the source
+            proxy.parent = obj.parent
+            proxy.matrix_parent_inverse = obj.matrix_parent_inverse.copy()
+            proxy.matrix_basis = obj.matrix_basis.copy()
         for n in chain:
             if n.name not in col.objects:
                 try:
@@ -271,10 +289,14 @@ def rebuild_layer_occlusion(vfx, master, layer):
 
 
 def rebuild_all_occlusion(vfx, master, report=False):
-    """Rebuild occlusion for every layer (create/delete/content changes)."""
+    """Rebuild occlusion for every layer (create/delete/content changes).
+    Also re-links missing parent Empties into layer collections (heals
+    layers created before the parenting fix)."""
     stats = {}
     for layer in vfx.layers:
         try:
+            if layer.collection:
+                ensure_parent_empties(layer.collection, layer.collection.objects)
             stats[layer.layer_name] = rebuild_layer_occlusion(vfx, master, layer)
         except Exception as exc:
             print(f"VFX occlusion: rebuild error on '{layer.layer_name}': {exc}")

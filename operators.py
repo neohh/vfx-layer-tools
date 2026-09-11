@@ -13,6 +13,7 @@ from .core import (
     create_empty_scene, exclude_collection_in_master, link_collection_to_scene,
     sync_scene_settings, remove_scene_safe, remove_shadow_collections,
     rename_layer, link_lights_to_all_scenes, sync_master_lights,
+    ensure_parent_empties,
 )
 from .shadow import (
     set_shadow_catcher, set_only_shadow_caster, refresh_shadow_proxies,
@@ -99,6 +100,8 @@ class VFX_OT_create_layer(bpy.types.Operator):
         for obj in selected:
             if col.objects.get(obj.name) is None:
                 col.objects.link(obj)
+        # parent Empties must come along, or children lose their transform
+        ensure_parent_empties(col, selected)
         scene = create_empty_scene(f"VFX_{name}", master)
         scene["vfx_id"] = layer_id
         scene["vfx_pass"] = "OBJECT"
@@ -150,6 +153,8 @@ class VFX_OT_add_selected_to_layer(bpy.types.Operator):
                 layer.collection.objects.link(obj)
                 count += 1
         if count:
+            # parent Empties must come along, or children lose their transform
+            ensure_parent_empties(layer.collection, selected)
             try:
                 rebuild_all_occlusion(vfx, master)  # layer content changed
             except Exception as e:
