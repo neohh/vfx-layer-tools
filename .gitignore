@@ -28,3 +28,4 @@ Thumbs.db
 # VFX addon temp
 *.tmp
 .vfx_layer_tools.~temp~
+vfx_layer_tools_v*.zip
