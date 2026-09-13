@@ -300,6 +300,7 @@ def _draw_post_effects(context, layout):
         fr2 = fb.row(align=True)
         fr2.prop(vfx, "ramp_black")
         fr2.prop(vfx, "ramp_white")
+        fb.prop(vfx, "fog_density")
         fb.prop(vfx, "fog_color", text="Fog Color")
         fb.label(text="Fog curve: edit VFX FOG node > FOG MAP RAMP",
                  icon='INFO')

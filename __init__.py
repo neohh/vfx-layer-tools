@@ -1,14 +1,14 @@
 bl_info = {
     "name": "VFX Layer Tools",
     "author": "VFX Pipeline",
-    "version": (3, 8, 0),
+    "version": (3, 9, 0),
     "blender": (5, 2, 1),
     "location": "View3D > Sidebar > VFX",
     "description": "VFX layer / scene / compositing manager",
     "category": "Compositing",
 }
 
-VFX_VERSION = "3.8.0"
+VFX_VERSION = "3.9.0"
 
 import bpy
 import importlib
@@ -365,6 +365,12 @@ class VFXProject(bpy.types.PropertyGroup):
         name="Fog Full (m)", default=30.0, min=0.0, max=10000.0,
         unit='LENGTH',
         description="Distance where fog reaches full density (meters)",
+        update=lambda s, c: _trigger_comp(c)
+    )
+    fog_density: FloatProperty(
+        name="Fog Density", default=1.0, min=0.0, max=1.0,
+        description="Global fog density: scales the whole fog map "
+                    "(0 = no fog, 1 = full ramp density)",
         update=lambda s, c: _trigger_comp(c)
     )
     comp_order_expanded: BoolProperty(
@@ -808,10 +814,37 @@ def _auto_reload_timer():
     return _AUTO_RELOAD_INTERVAL
 
 
+def _migrate_ramp_values():
+    """One-time fog ramp migration (fractions -> meters), runs after file load.
+
+    Registered from register() as a timer: timers fire only once Blender has
+    a loaded file, so bpy.data.scenes is safe to touch here.
+    """
+    for sc in bpy.data.scenes:
+        try:
+            v = getattr(sc, "vfx", None)
+            if v is None or v.get("vfx_ramp_migrated"):
+                continue
+            if v.ramp_white <= 1.0:
+                v.ramp_white = 30.0
+                print(f"VFX: migrated Fog Full 0..1 fraction to meters in '{sc.name}'")
+            if v.ramp_black > v.ramp_white:
+                v.ramp_black = 0.0
+            v["vfx_ramp_migrated"] = True
+        except Exception:
+            continue
+    return None  # don't repeat
+
+
 def unregister():
     # stop auto-reload timer
     try:
         bpy.app.timers.unregister(_auto_reload_timer)
+    except Exception:
+        pass
+    # stop a pending migration timer (disable/re-enable before it fired)
+    try:
+        bpy.app.timers.unregister(_migrate_ramp_values)
     except Exception:
         pass
 
@@ -897,21 +930,15 @@ def register():
 
     # One-time migration: old ramp values were mist fractions (0..1),
     # new ones are meters. A stale 0.11 m "Fog Full" sits below Mist Start
-    # and kills all fog. Per-scene try: one unwritable (linked) scene
-    # must not abort the loop for the rest.
-    for sc in bpy.data.scenes:
-        try:
-            v = getattr(sc, "vfx", None)
-            if v is None or v.get("vfx_ramp_migrated"):
-                continue
-            if v.ramp_white <= 1.0:
-                v.ramp_white = 30.0
-                print(f"VFX: migrated Fog Full 0..1 fraction to meters in '{sc.name}'")
-            if v.ramp_black > v.ramp_white:
-                v.ramp_black = 0.0
-            v["vfx_ramp_migrated"] = True
-        except Exception:
-            continue
+    # and kills all fog. DEFERRED to a timer: while the addon is being
+    # enabled, bpy.data is a restricted _RestrictData object (it becomes
+    # usable only after the .blend file has loaded) and touching it raises
+    # "'_RestrictData' object has no attribute 'scenes'" — which aborted
+    # register() so the addon checkbox never stuck across restarts.
+    try:
+        bpy.app.timers.register(_migrate_ramp_values, first_interval=0.1)
+    except Exception:
+        pass
 
     # kick off auto-reload timer
     if _AUTO_RELOAD_ENABLED:

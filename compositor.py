@@ -1006,9 +1006,9 @@ def _build_fog_group2(vfx):
     existing group is missing, still has the OLD socket set, or carries an
     older scheme version (ng["vfx_fog_version"] < VFX_FOG_SCHEME_VERSION).
     """
-    VFX_FOG_SCHEME_VERSION = 3  # 3 = exact reference topology, no extra nodes
+    VFX_FOG_SCHEME_VERSION = 4  # 4 = reference topology + Density (MapRange To Max)
     ng = bpy.data.node_groups.get("VFX_FogGroup")
-    needed_inputs = {"Image", "Depth", "Fog Color", "Ramp Black", "Ramp White"}
+    needed_inputs = {"Image", "Depth", "Fog Color", "Ramp Black", "Ramp White", "Density"}
     if ng is not None:
         try:
             have = {s.name for s in ng.interface.items_tree
@@ -1041,6 +1041,8 @@ def _build_fog_group2(vfx):
     ng.interface.new_socket("Fog Color", in_out='INPUT', socket_type='NodeSocketColor')
     ng.interface.new_socket("Ramp Black", in_out='INPUT', socket_type='NodeSocketFloat')
     ng.interface.new_socket("Ramp White", in_out='INPUT', socket_type='NodeSocketFloat')
+    # Density: global multiplier, enters via MapRange To Max (NO extra node)
+    ng.interface.new_socket("Density", in_out='INPUT', socket_type='NodeSocketFloat')
     ng.interface.new_socket("Image", in_out='OUTPUT', socket_type='NodeSocketColor')
     ng.interface.new_socket("Mask", in_out='OUTPUT', socket_type='NodeSocketFloat')
 
@@ -1070,6 +1072,16 @@ def _build_fog_group2(vfx):
     ng.links.new(g_in("Depth"), mr.inputs.get("Value"))
     ng.links.new(g_in("Ramp Black"), mr.inputs.get("From Min"))
     ng.links.new(g_in("Ramp White"), mr.inputs.get("From Max"))
+    try:
+        mr.inputs.get("To Min").default_value = 0.0
+    except Exception:
+        pass
+    # density scales the map's ceiling: To Max = Density. MapRange clamps,
+    # so the ramp still sees a clean 0..1 and topology stays the reference.
+    try:
+        ng.links.new(g_in("Density"), mr.inputs.get("To Max"))
+    except Exception:
+        pass
 
     # EDITABLE ramp: the fog density curve (like the reference scheme:
     # black = near/clear, white = far/dense). User can re-shape it freely.
@@ -1385,6 +1397,10 @@ def build_comp_assembly(vfx, master, nt=None):
                 s = gi(name)
                 if s is not None:
                     s.default_value = val
+
+            dens = gi("Density")
+            if dens is not None:
+                dens.default_value = float(getattr(vfx, "fog_density", 1.0))
 
             scol = gi("Fog Color")
             if scol is not None:
