@@ -29,10 +29,9 @@
 - Настройка интенсивности теней (shadow strength)
 
 ### 🌫️ Туман (Fog)
-- Единая live mist-маска на всю сцену (VFX_FOGMAP)
-- Контроль глубины тумана: Mist Start / Mist Depth
-- Ramp Black / Ramp White для настройки градиента
-- Per-layer multiplier (fog factor) — разная плотность тумана на разных слоях
+- Слои собираются в единый стек (фон → тени → объекты) и подаются в фог-группу одной картинкой
+- VFX FOG группа: Depth → редактируемая ColorRamp (`FOG MAP RAMP`) → Invert → Mix (цвет тумана / слои)
+- Глубина тумана в метрах: Fog Start / Fog Full
 - Цвет тумана (Fog Color)
 - Режим просмотра маски (fog preview)
 
@@ -121,11 +120,10 @@ core.py       ──→  (чистый модуль)
 
 ### Туман
 
-1. Включите **Fog (Mist pass)**
-2. Настройте Mist Start / Mist Depth
-3. Подберите Ramp Black / Ramp White
-4. Увеличьте Density (global) для появления тумана
-5. Отрегулируйте per-layer Fog Factor на отдельных слоях
+1. Включите **Fog**
+2. Настройте Fog Start / Fog Full (метры от камеры)
+3. Увеличьте Density (global) для появления тумана
+4. Форму кривой тумана правьте в нод-группе `VFX FOG` → рампа `FOG MAP RAMP`
 
 ---
 

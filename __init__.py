@@ -1,14 +1,14 @@
 bl_info = {
     "name": "VFX Layer Tools",
     "author": "VFX Pipeline",
-    "version": (3, 5, 0),
+    "version": (3, 6, 0),
     "blender": (5, 2, 1),
     "location": "View3D > Sidebar > VFX",
     "description": "VFX layer / scene / compositing manager",
     "category": "Compositing",
 }
 
-VFX_VERSION = "3.5.0"
+VFX_VERSION = "3.6.0"
 
 import bpy
 import importlib
@@ -176,26 +176,6 @@ class VFXLayer(bpy.types.PropertyGroup):
     )
     shadow_strength: FloatProperty(
         name="Shadow Strength", default=1.0, min=0.0, max=1.0,
-        update=lambda self, ctx: _trigger_comp(ctx)
-    )
-    fog_factor: FloatProperty(
-        name="Fog x(layer)", default=1.0, min=0.0, max=2.0,
-        description="Per-layer fog amount: 0 = no fog on this layer, "
-                    "1 = normal, 2 = double",
-        update=lambda self, ctx: _trigger_comp(ctx)
-    )
-    fog_map_bias: FloatProperty(
-        name="Fog Map Bias", default=0.0, min=-1.0, max=1.0,
-        description="Shift this layer on the shared fog (depth) map: "
-                    "positive = treated as farther (foggier), "
-                    "negative = closer (clearer)",
-        update=lambda self, ctx: _trigger_comp(ctx)
-    )
-    fog_map_gain: FloatProperty(
-        name="Fog Map Gain", default=1.0, min=0.0, max=4.0,
-        description="Contrast of this layer's part of the fog map: "
-                    "> 1 = fog falls off faster with distance, "
-                    "< 1 = softer, more even haze",
         update=lambda self, ctx: _trigger_comp(ctx)
     )
     use_alpha_mask: BoolProperty(
@@ -377,7 +357,7 @@ class VFXProject(bpy.types.PropertyGroup):
     )
     fog_strength: FloatProperty(
         name="Density (global)", default=0.0, min=0.0, max=1.0,
-        description="Overall fog density, multiplies every layer",
+        description="Overall fog density, scales the shared fog map",
         update=lambda s, c: _fog_changed(c)
     )
     fog_color: FloatVectorProperty(
@@ -501,12 +481,6 @@ class VFXProject(bpy.types.PropertyGroup):
     fog_expanded: BoolProperty(
         name="Fog settings expanded",
         default=False
-    )
-    bg_fog_factor: FloatProperty(
-        name="BG Fog", default=0.0, min=0.0, max=2.0,
-        description="Haze on the background/world (0 = off). The sky has no "
-                    "depth map, so a high value just paints flat fog color",
-        update=lambda s, c: _trigger_comp(c)
     )
     use_glare: BoolProperty(
         name="Glare / Bloom",

@@ -987,11 +987,39 @@ def _fog_mix_node(ng, loc):
             mix.outputs[0] if len(mix.outputs) else None)
 
 
-def _build_fog_group2(vfx, has_bg=True, order=None, bg_fog=False,
-                      z_near=0.0, z_far=100.0):
+def _build_fog_group2(vfx):
+    """VFX_FogGroup — minimal scheme (reference topology):
+
+        Depth (m) -> MapRange(Fog Start..Fog Full, clamped)
+                  -> ColorRamp (EDITABLE density curve: black=near, white=far)
+                  -> [* Strength] -> [* Extra Mask] -> density
+        density -> Invert -> Mix.Factor
+        Mix.A = Fog Color
+        Mix.B = Image input (layers assembled OUTSIDE the group)
+
+    Outputs: Image (fogged comp), Mask (fog density, white = dense).
+
+    The internals are built ONCE and then left alone, so the user's
+    ColorRamp edits survive comp rebuilds. A rebuild happens only if the
+    existing group is missing or still has the OLD socket set.
+    """
     ng = bpy.data.node_groups.get("VFX_FogGroup")
-    if ng is None:
-        ng = bpy.data.node_groups.new("VFX_FogGroup", 'CompositorNodeTree')
+    needed_inputs = {"Image", "Depth", "Strength", "Extra Mask",
+                     "Fog Color", "Ramp Black", "Ramp White"}
+    if ng is not None:
+        try:
+            have = {s.name for s in ng.interface.items_tree
+                    if hasattr(s, "in_out") and s.in_out == 'INPUT'}
+        except Exception:
+            have = set()
+        if needed_inputs.issubset(have):
+            return ng  # modern group already built — keep user's ramp edits
+        # old-scheme group (per-layer OBJ_/AL_/F_ sockets...) — purge it
+        try:
+            bpy.data.node_groups.remove(ng)
+        except Exception:
+            ng.use_fake_user = False
+    ng = bpy.data.node_groups.new("VFX_FogGroup", 'CompositorNodeTree')
     ng.nodes.clear()
     try:
         ng.interface.items_clear()
@@ -1001,45 +1029,20 @@ def _build_fog_group2(vfx, has_bg=True, order=None, bg_fog=False,
         except Exception:
             pass
 
-    ng.interface.new_socket("Z", in_out='INPUT', socket_type='NodeSocketFloat')
+    ng.interface.new_socket("Image", in_out='INPUT', socket_type='NodeSocketColor')
+    ng.interface.new_socket("Depth", in_out='INPUT', socket_type='NodeSocketFloat')
     ng.interface.new_socket("Strength", in_out='INPUT', socket_type='NodeSocketFloat')
     ng.interface.new_socket("Extra Mask", in_out='INPUT', socket_type='NodeSocketFloat')
     ng.interface.new_socket("Fog Color", in_out='INPUT', socket_type='NodeSocketColor')
-    if has_bg:
-        ng.interface.new_socket("BG Image", in_out='INPUT', socket_type='NodeSocketColor')
-        ng.interface.new_socket("F_BG", in_out='INPUT', socket_type='NodeSocketFloat')
-
-    meta = []
-    if order is None:
-        order = list(reversed(vfx.layers))  # legacy: list order back-to-front
-    for layer in order:
-        if not (layer.enabled and layer.scene):
-            continue
-        meta.append({"id": layer.id, "layer": layer,
-                     "shd": bool(layer.shadow_scene)})
-        ng.interface.new_socket(f"OBJ_{layer.id}", in_out='INPUT',
-                                socket_type='NodeSocketColor')
-        ng.interface.new_socket(f"AL_{layer.id}", in_out='INPUT',
-                                socket_type='NodeSocketFloat')
-        ng.interface.new_socket(f"F_{layer.id}", in_out='INPUT',
-                                socket_type='NodeSocketFloat')
-        ng.interface.new_socket(f"B_{layer.id}", in_out='INPUT',
-                                socket_type='NodeSocketFloat')
-        ng.interface.new_socket(f"G_{layer.id}", in_out='INPUT',
-                                socket_type='NodeSocketFloat')
-        if layer.shadow_scene:
-            ng.interface.new_socket(f"SHD_{layer.id}", in_out='INPUT',
-                                    socket_type='NodeSocketColor')
-            ng.interface.new_socket(f"SS_{layer.id}", in_out='INPUT',
-                                    socket_type='NodeSocketFloat')
-
+    ng.interface.new_socket("Ramp Black", in_out='INPUT', socket_type='NodeSocketFloat')
+    ng.interface.new_socket("Ramp White", in_out='INPUT', socket_type='NodeSocketFloat')
     ng.interface.new_socket("Image", in_out='OUTPUT', socket_type='NodeSocketColor')
     ng.interface.new_socket("Mask", in_out='OUTPUT', socket_type='NodeSocketFloat')
 
     gin = ng.nodes.new("NodeGroupInput")
-    gin.location = (-1100, 0)
+    gin.location = (-900, 0)
     gout = ng.nodes.new("NodeGroupOutput")
-    gout.location = (900, 0)
+    gout.location = (750, 0)
 
     def g_in(name):
         return gin.outputs.get(name)
@@ -1051,151 +1054,128 @@ def _build_fog_group2(vfx, has_bg=True, order=None, bg_fog=False,
             m.location = loc
         return m
 
-    # ── FOG FACTOR: depth (Z, meters) -> 0..1 density ──
-    # MapRange clamps its output, so no division can ever pin the factor:
-    # near = clear, far = full fog color. White on the mask = dense fog.
+    # meters -> 0..1 over the Fog Start..Fog Full window.
+    # MapRange clamps by itself, no division anywhere -> factor can never
+    # get stuck at 0 or 1 (the old bug class).
     mr = _new_node(ng, "ShaderNodeMapRange", "CompositorNodeMapRange")
     if mr is None:
-        return ng, meta
-    mr.location = (-800, 300)
+        return ng
+    mr.location = (-700, 250)
     try:
-        mr.interpolation_type = 'SMOOTHSTEP'
+        mr.interpolation_type = 'LINEAR'
     except Exception:
         pass
-    ng.links.new(g_in("Z"), mr.inputs.get("Value"))
-    mr.inputs.get("From Min").default_value = float(z_near)
-    mr.inputs.get("From Max").default_value = float(z_far)
-    mr.inputs.get("To Min").default_value = 0.0
-    mr.inputs.get("To Max").default_value = 1.0
-    base = mr.outputs.get("Result")
-    mstr = math_node('MULTIPLY', (-550, 300))
-    if mstr is None:
-        return ng, meta
-    ng.links.new(base, mstr.inputs[0])
-    ng.links.new(g_in("Strength"), mstr.inputs[1])
-    # extra mask (from build_mask) limits where fog acts at all
-    mstr2 = math_node('MULTIPLY', (-400, 300))
-    if mstr2 is not None:
-        ng.links.new(mstr.outputs[0], mstr2.inputs[0])
-        em = g_in("Extra Mask")
-        if em is not None:
-            ng.links.new(em, mstr2.inputs[1])
-        mask_out = mstr2.outputs[0]
-    else:
-        mask_out = mstr.outputs[0]
-    if mask_out is None:
-        return ng, meta
-    sep = _new_node(ng, "ShaderNodeSeparateColor", "CompositorNodeSeparateColor")
-    if sep is not None:
-        sep.location = (-800, 0)
+    try:
+        mr.clamp = True
+    except Exception:
+        pass
+    ng.links.new(g_in("Depth"), mr.inputs.get("Value"))
+    ng.links.new(g_in("Ramp Black"), mr.inputs.get("From Min"))
+    ng.links.new(g_in("Ramp White"), mr.inputs.get("From Max"))
 
-    def fogged(img_sock, f_sock, alpha_sock, y,
-               bias_sock=None, gain_sock=None, ly=0):
-        # per-layer shape of the shared depth map:
-        # fac = clamp((Z - near) / (far - near), 0, 1) ^ gain * strength
-        #       then shifted by bias (subtracted, clamped by the Mix later)
-        pw = math_node('POWER', (-680, y))
-        if pw is not None and gain_sock is not None:
-            ng.links.new(base, pw.inputs[0])
-            ng.links.new(gain_sock, pw.inputs[1])
-            layer_map = pw.outputs[0]
-        else:
-            layer_map = base
-        shifted = math_node('SUBTRACT', (-560, y))
-        if shifted is not None and bias_sock is not None:
-            ng.links.new(layer_map, shifted.inputs[0])
-            ng.links.new(bias_sock, shifted.inputs[1])
-            layer_map = shifted.outputs[0]
-        fm = math_node('MULTIPLY', (-470, y))
-        if fm is None:
-            return img_sock
-        ng.links.new(layer_map, fm.inputs[0])
-        ng.links.new(f_sock, fm.inputs[1])
-        # clamp back into 0..1 (bias/gain can push it out)
-        cl = math_node('MINIMUM', (-390, y))
-        if cl is not None:
-            ng.links.new(fm.outputs[0], cl.inputs[0])
-            cl.inputs[1].default_value = 1.0
-            fac_final = cl.outputs[0]
-        else:
-            fac_final = fm.outputs[0]
-        mix, fac_in, a_in, b_in, out_s = _fog_mix_node(ng, (-150, y))
-        if mix is None or fac_in is None or out_s is None:
-            return img_sock
-        comb = _new_node(ng, "CompositorNodeCombineColor", "ShaderNodeCombineColor")
-        if comb is not None and sep is not None:
-            comb.location = (-350, y - 150)
-            ng.links.new(g_in("Fog Color"), sep.inputs[0])
-            ng.links.new(sep.outputs[0], comb.inputs[0])
-            ng.links.new(sep.outputs[1], comb.inputs[1])
-            ng.links.new(sep.outputs[2], comb.inputs[2])
-            if alpha_sock is not None:
-                ng.links.new(alpha_sock, comb.inputs[3])
-            else:
-                comb.inputs[3].default_value = 1.0
-            ng.links.new(comb.outputs[0], b_in)
-        else:
-            ng.links.new(g_in("Fog Color"), b_in)
-        ng.links.new(fac_final, fac_in)
-        ng.links.new(img_sock, a_in)
-        return out_s
+    # EDITABLE ramp: the fog density curve (like the reference scheme:
+    # black = near/clear, white = far/dense). User can re-shape it freely.
+    ramp = _new_node(ng, "CompositorNodeValToRGB", "ShaderNodeValToRGB")
+    if ramp is None:
+        return ng
+    ramp.location = (-500, 250)
+    ramp.name = "VFX_FOG_RAMP"
+    ramp.label = "FOG MAP RAMP (edit me)"
+    try:
+        ramp.color_ramp.elements[0].position = 0.0
+        ramp.color_ramp.elements[0].color = (0.0, 0.0, 0.0, 1.0)
+        ramp.color_ramp.elements[1].position = 1.0
+        ramp.color_ramp.elements[1].color = (1.0, 1.0, 1.0, 1.0)
+    except Exception:
+        pass
+    ng.links.new(mr.outputs.get("Result"), ramp.inputs[0])
 
-    def alpha_over(bg_sock, fg_sock, fac_sock=None, fac_value=None, y=0):
-        ao = _new_node(ng, "CompositorNodeAlphaOver")
-        if ao is None:
-            return bg_sock
-        ao.location = (400, y)
-        img = [s for s in ao.inputs if s.type == 'RGBA']
-        if len(img) >= 2:
-            ng.links.new(bg_sock, img[0])
-            ng.links.new(fg_sock, img[1])
-        vs = [s for s in ao.inputs if s.type == 'VALUE']
-        if vs:
-            if fac_sock is not None:
-                ng.links.new(fac_sock, vs[0])
-            elif fac_value is not None:
-                vs[0].default_value = fac_value
-        outs = [s for s in ao.outputs if s.type == 'RGBA']
-        return outs[0] if outs else bg_sock
+    # Strength scales the DENSITY (not the inverted factor!), otherwise
+    # Strength = 0 would mean "wall of fog everywhere".
+    fog_fac = math_node('MULTIPLY', (-300, 250))
+    if fog_fac is None:
+        return ng
+    ng.links.new(ramp.outputs[0], fog_fac.inputs[0])
+    ng.links.new(g_in("Strength"), fog_fac.inputs[1])
 
-    y = 700
-    cur = None
-    if has_bg:
-        fbg = g_in("F_BG")
-        # BG has no depth: only fog it when the user explicitly asks for haze,
-        # otherwise pass the background through untouched.
-        if bg_fog and fbg is not None:
-            cur = fogged(g_in("BG Image"), fbg, None, y)
-        else:
-            cur = g_in("BG Image")
-        y -= 250
+    em = g_in("Extra Mask")
+    if em is not None:
+        fm2 = math_node('MULTIPLY', (-100, 250))
+        if fm2 is not None:
+            ng.links.new(fog_fac.outputs[0], fm2.inputs[0])
+            ng.links.new(em, fm2.inputs[1])
+            fog_fac = fm2
+    density_sock = fog_fac.outputs[0]
 
-    for entry in meta:
-        lid = entry["id"]
-        fog_obj = fogged(g_in(f"OBJ_{lid}"), g_in(f"F_{lid}"),
-                         g_in(f"AL_{lid}"), y,
-                         bias_sock=g_in(f"B_{lid}"), gain_sock=g_in(f"G_{lid}"))
-        y -= 250
-        if cur is None:
-            cur = fog_obj
-        else:
-            cur = alpha_over(cur, fog_obj, y=y)
-        if entry["shd"]:
-            cur = alpha_over(cur, g_in(f"SHD_{lid}"),
-                             fac_sock=g_in(f"SS_{lid}"), y=y)
-        y -= 250
+    # invert: density -> mix factor (1 = clear layers, 0 = fog color)
+    inv = _new_node(ng, "CompositorNodeInvert", "ShaderNodeInvert")
+    if inv is None:
+        return ng
+    inv.location = (100, 250)
+    inv.name = "VFX_FOG_INV"
+    ng.links.new(density_sock, inv.inputs[0])
+    factor_sock = inv.outputs[0]
 
-    if cur is None:
-        return ng, meta
+    # ── MIX (reference scheme): Fac = inverted map, A = Fog Color,
+    #    B = assembled layers ──
+    mix = _new_node(ng, "CompositorNodeMixRGB", "ShaderNodeMix")
+    if mix is None:
+        return ng
+    mix.location = (450, 0)
+    try:
+        mix.data_type = 'RGBA'
+    except Exception:
+        pass
+    try:
+        mix.blend_type = 'MIX'
+    except Exception:
+        pass
+    try:
+        mix.clamp_factor = True
+        mix.clamp_result = False
+    except Exception:
+        pass
+    # ShaderNodeMix has several sockets named A/B (Float, Vector, Color)
+    # and its factor is called 'Factor' — pick sockets by type AND name,
+    # inputs.get() would return the (wrong) Float sockets.
+    a_sock = b_sock = fac_sock = None
+    for s in mix.inputs:
+        if s.type == 'RGBA' and s.name == 'A':
+            a_sock = s
+        elif s.type == 'RGBA' and s.name == 'B':
+            b_sock = s
+        elif s.type == 'VALUE' and s.name in ('Factor', 'Fac'):
+            fac_sock = s
+    if a_sock is None:
+        a_sock = mix.inputs.get("Color1")
+    if b_sock is None:
+        b_sock = mix.inputs.get("Color2")
 
+    fog_color_sock = g_in("Fog Color")
+    if a_sock is not None and fog_color_sock is not None:
+        ng.links.new(fog_color_sock, a_sock)
+    img_in = g_in("Image")
+    if b_sock is not None and img_in is not None:
+        ng.links.new(img_in, b_sock)
+    if fac_sock is not None:
+        ng.links.new(factor_sock, fac_sock)
+
+    img_out = None
+    for s in mix.outputs:
+        if s.type == 'RGBA':
+            img_out = s
+            break
+    if img_out is None and mix.outputs:
+        img_out = mix.outputs[-1]
     oi = gout.inputs.get("Image")
-    if oi is not None:
-        ng.links.new(cur, oi)
-    mk = gout.inputs.get("Mask")
-    if mk is not None:
-        ng.links.new(mask_out, mk)
+    if img_out is not None and oi is not None:
+        ng.links.new(img_out, oi)
+    mk_out = gout.inputs.get("Mask")
+    if mk_out is not None:
+        # Mask out = fog DENSITY (white = dense fog) for preview/masks
+        ng.links.new(density_sock, mk_out)
 
-    return ng, meta
+    return ng
 
 
 def build_comp_assembly(vfx, master, nt=None):
@@ -1281,196 +1261,177 @@ def build_comp_assembly(vfx, master, nt=None):
     # ── PER-LAYER GRADES ──
     grade_nodes = ensure_layer_grades(vfx, master, nt)
 
-    # туман
+    # ── ASSEMBLE THE FULL STACK (BG -> SHD -> OBJ, grades applied) ──
+    # Layers are composited into ONE image outside the fog group;
+    # the group then mixes this assembled stack with the fog color
+    # by the shared depth-ramp map.
+    if bg_sock is not None:
+        stack_sock = bg_sock
+        mix_list = sockets
+    elif sockets:
+        stack_sock = sockets[0][2]
+        mix_list = sockets[1:]
+    else:
+        stack_sock = None
+        mix_list = []
+
+    current = stack_sock
+    mix_index = 0
+    for layer, kind, sock in mix_list:
+        gsock = grade_nodes.get(layer.id) if kind == 'OBJ' else None
+        if gsock is not None:
+            sock = gsock
+        mix = nt.nodes.new("CompositorNodeAlphaOver")
+        mix.name = f"VFX_MIX_{mix_index:02d}"
+        mix.label = f"{layer.layer_name} {kind}"
+        mix["vfx_mix"] = 1
+        mix.location = (800, -mix_index * 200)
+
+        img = [s for s in mix.inputs if s.type == 'RGBA']
+        fac = [s for s in mix.inputs if s.type == 'VALUE']
+
+        if len(img) >= 2:
+            bg, fg = img[0], img[1]
+        else:
+            bg, fg = mix.inputs[1], mix.inputs[2]
+
+        mix_fac = 1.0
+        if kind == 'SHD':
+            mix_fac = getattr(layer, "shadow_strength", 1.0)
+        for f in fac:
+            try:
+                f.default_value = mix_fac
+            except Exception:
+                pass
+
+        nt.links.new(current, bg)
+        nt.links.new(sock, fg)
+
+        outs = [s for s in mix.outputs if s.type == 'RGBA']
+        current = outs[0] if outs else mix.outputs[0]
+        mix_index += 1
+
+    # ── FOG: assembled stack -> VFX_FogGroup ──
     if getattr(vfx, "use_fog", False):
         try:
+            if current is None:
+                raise RuntimeError("no layer stack to fog")
             _ensure_fogmap(nt, vfx, master)
-            zsock = _get_depth_socket(nt)
-            mist = _get_mist_socket(nt)
-            if zsock is None and mist is not None:
-                # Fallback: no Z pass -> synthesize meters from mist
-                # (0 near .. 1 far): Z = mist_start + mist * mist_depth.
-                fb_add = _new_node(nt, "CompositorNodeMath", "ShaderNodeMath")
-                fb_mul = _new_node(nt, "CompositorNodeMath", "ShaderNodeMath")
-                if fb_add is not None and fb_mul is not None:
-                    fb_mul.operation = 'MULTIPLY'
-                    fb_add.operation = 'ADD'
-                    fb_mul.location = (-430, 480)
-                    fb_add.location = (-330, 480)
-                    fb_mul.name = "VFX_FOG_ZFALLBACK"
-                    fb_add.name = "VFX_FOG_ZFALLBACK_ADD"
-                    for l in list(fb_mul.inputs[0].links):
-                        nt.links.remove(l)
-                    nt.links.new(mist, fb_mul.inputs[0])
-                    fb_mul.inputs[1].default_value = float(vfx.mist_depth)
-                    for l in list(fb_add.inputs[0].links):
-                        nt.links.remove(l)
-                    nt.links.new(fb_mul.outputs[0], fb_add.inputs[0])
-                    fb_add.inputs[1].default_value = float(vfx.mist_start)
-                    zsock = fb_add.outputs[0]
-                    print("VFX fog: Z pass unavailable, using mist-based depth fallback")
-            if zsock is not None:
-                z_near = ramp_black
-                z_far = ramp_white
-                ng, meta = _build_fog_group2(
-                    vfx, has_bg=bg_sock is not None, order=order,
-                    bg_fog=(getattr(vfx, "bg_fog_factor", 0.0) > 0.0),
-                    z_near=z_near, z_far=z_far)
-                gnode = nt.nodes.get("VFX_FOG_GROUP")
-                if gnode is None:
-                    gnode = None
-                    for bid in ("CompositorNodeGroup",
-                                "ShaderNodeGroup",
-                                "NodeGroup"):
-                        try:
-                            gnode = nt.nodes.new(bid)
-                            break
-                        except Exception:
-                            continue
-                    if gnode is None:
-                        raise RuntimeError("no group node id")
+            depth_sock = _get_depth_socket(nt)
+            depth_is_z = depth_sock is not None
+            if depth_sock is None:
+                # Fallback: synthesize meters from the mist fraction
+                # (Z = Mist Start + mist * Mist Depth).
+                fm_node = nt.nodes.get("VFX_RL_FOGMAP")
+                mist_out = fm_node.outputs.get("Mist") if fm_node else None
+                if mist_out is not None:
+                    fb = nt.nodes.get("VFX_FOG_DEPTH_FB")
+                    if fb is not None and fb.type != 'MAP_RANGE':
+                        nt.nodes.remove(fb)
+                        fb = None
+                    if fb is None:
+                        fb = _new_node(nt, "ShaderNodeMapRange",
+                                       "CompositorNodeMapRange")
+                        if fb is not None:
+                            fb.name = "VFX_FOG_DEPTH_FB"
+                            fb.label = "mist -> meters"
+                    if fb is not None:
+                        fb.location = (-350, 600)
+                        for name, val in (("From Min", 0.0), ("From Max", 1.0),
+                                          ("To Min", float(vfx.mist_start)),
+                                          ("To Max", float(vfx.mist_start)
+                                           + max(0.1, float(vfx.mist_depth)))):
+                            s = fb.inputs.get(name)
+                            if s is not None:
+                                s.default_value = val
+                        for l in list(fb.inputs.get("Value").links):
+                            nt.links.remove(l)
+                        nt.links.new(mist_out, fb.inputs.get("Value"))
+                        depth_sock = fb.outputs.get("Result")
+
+            ng = _build_fog_group2(vfx)
+            gnode = nt.nodes.get("VFX_FOG_GROUP")
+            if gnode is not None and gnode.type != 'GROUP':
+                nt.nodes.remove(gnode)
+                gnode = None
+            if gnode is None:
+                gnode = _new_node(nt, "CompositorNodeGroup",
+                                  "ShaderNodeGroup", "NodeGroup")
+                if gnode is not None:
                     gnode.name = "VFX_FOG_GROUP"
-                    gnode.label = "FOG"
-                    gnode.location = (500, 500)
-                gnode.node_tree = ng
+            if gnode is None:
+                raise RuntimeError("VFX fog group node not created")
+            gnode.node_tree = ng
+            gnode.label = "VFX FOG"
+            gnode.location = (1050, 0)
 
-                def relink(sock, out):
-                    for l in list(sock.links):
-                        nt.links.remove(l)
-                    nt.links.new(out, sock)
+            def relink(sock, out):
+                for l in list(sock.links):
+                    nt.links.remove(l)
+                nt.links.new(out, sock)
 
-                gi = lambda n: gnode.inputs.get(n)
+            gi = lambda n: gnode.inputs.get(n)
 
-                sz = gi("Z")
-                if sz is not None and zsock is not None:
-                    relink(sz, zsock)
+            sm = gi("Image")
+            if sm is not None and current is not None:
+                relink(sm, current)
 
-                for name, val in (("Strength", vfx.fog_strength),
-                                  ("F_BG", vfx.bg_fog_factor if getattr(vfx, "bg_fog_factor", 0.0) > 0.0 else 0.0)):
-                    s = gi(name)
-                    if s is not None:
-                        s.default_value = val
-                # Optional extra mask on fog (from MASK_* chain)
+            sd = gi("Depth")
+            if sd is not None:
+                if depth_sock is not None:
+                    relink(sd, depth_sock)
+                else:
+                    sd.default_value = 0.0
+
+            for name, val in (("Strength", vfx.fog_strength),
+                              ("Ramp Black", ramp_black),
+                              ("Ramp White", ramp_white)):
+                s = gi(name)
+                if s is not None:
+                    s.default_value = val
+
+            # Optional extra mask on fog (from MASK_* chain)
+            try:
+                em = gi("Extra Mask")
+                fmask = build_mask(
+                    nt, vfx, "FOG", getattr(vfx, "fog_mask_source", 'NONE'),
+                    vfx.fog_mask_invert, vfx.fog_mask_soft,
+                    vfx.fog_mask_depth_start, vfx.fog_mask_depth_end,
+                    vfx.fog_mask_luma_lo, vfx.fog_mask_luma_hi,
+                    ext_node=vfx.fog_mask_ext_node, image_sock=depth_sock)
+                if em is not None:
+                    if fmask is not None:
+                        relink(em, fmask)
+                    else:
+                        em.default_value = 1.0
+                    if fmask is not None and getattr(vfx, "use_mask", False) and getattr(vfx, "mask_source", 'NONE') == 'FOG':
+                        view_sock = fmask
+            except Exception as e:
+                print("VFX fog mask error:", e)
+
+            scol = gi("Fog Color")
+            if scol is not None:
                 try:
-                    em = gi("Extra Mask")
-                    fmask = build_mask(
-                        nt, vfx, "FOG", getattr(vfx, "fog_mask_source", 'NONE'),
-                        vfx.fog_mask_invert, vfx.fog_mask_soft,
-                        vfx.fog_mask_depth_start, vfx.fog_mask_depth_end,
-                        vfx.fog_mask_luma_lo, vfx.fog_mask_luma_hi,
-                        ext_node=vfx.fog_mask_ext_node, image_sock=mist)
-                    if em is not None:
-                        if fmask is not None:
-                            for l in list(em.links):
-                                nt.links.remove(l)
-                            nt.links.new(fmask, em)
-                        else:
-                            em.default_value = 1.0
-                        if fmask is not None and getattr(vfx, "use_mask", False) and getattr(vfx, "mask_source", 'NONE') == 'FOG':
-                            view_sock = fmask
-                except Exception as e:
-                    print("VFX fog mask error:", e)
-                scol = gi("Fog Color")
-                if scol is not None:
-                    try:
-                        r, g, b, a = vfx.fog_color
-                        scol.default_value = (r, g, b, 1.0)
-                    except Exception:
-                        pass
-                sbg = gi("BG Image")
-                if sbg is not None and bgn is not None \
-                        and bgn.outputs.get("Image"):
-                    relink(sbg, bgn.outputs["Image"])
+                    r, g, b, a = vfx.fog_color
+                    scol.default_value = (r, g, b, 1.0)
+                except Exception:
+                    pass
 
-                for entry in meta:
-                    lid = entry["id"]
-                    lay = entry["layer"]
-                    ln = nt.nodes.get(f"VFX_RL_{lid}")
-                    src_sock = grade_nodes.get(lid)
-                    if src_sock is None:
-                        src_sock = ln.outputs.get("Image") if ln else None
-                    s = gi(f"OBJ_{lid}")
-                    if s is not None and src_sock is not None:
-                        relink(s, src_sock)
-                    s = gi(f"AL_{lid}")
-                    if s is not None and ln is not None and ln.outputs.get("Alpha"):
-                        relink(s, ln.outputs["Alpha"])
-                    s = gi(f"F_{lid}")
-                    if s is not None:
-                        s.default_value = lay.fog_factor
-                    s = gi(f"B_{lid}")
-                    if s is not None:
-                        s.default_value = getattr(lay, "fog_map_bias", 0.0)
-                    s = gi(f"G_{lid}")
-                    if s is not None:
-                        s.default_value = max(0.01, getattr(lay, "fog_map_gain", 1.0))
-                    if entry["shd"]:
-                        shn = nt.nodes.get(f"VFX_RL_{lid}_SHD")
-                        s = gi(f"SHD_{lid}")
-                        if s is not None and shn is not None \
-                                and shn.outputs.get("Image"):
-                            relink(s, shn.outputs["Image"])
-                        s = gi(f"SS_{lid}")
-                        if s is not None:
-                            s.default_value = lay.shadow_strength
-
-                oi = gnode.outputs.get("Image")
-                if oi is not None:
-                    current = oi
-                    fog_done = True
-                if getattr(vfx, "use_mask", False) and getattr(vfx, "mask_source", 'NONE') == 'FOG':
-                    om = gnode.outputs.get("Mask")
-                    if om is not None:
-                        view_sock = om
+            oi = gnode.outputs.get("Image")
+            if oi is not None:
+                current = oi
+                fog_done = True
+                print(f"[VFX fog] assembled stack ({mix_index} over-nodes) "
+                      f"-> fog group, depth source: "
+                      f"{'Z' if depth_is_z else 'mist fallback'}")
+            om = gnode.outputs.get("Mask")
+            if om is not None and getattr(vfx, "use_mask", False) and getattr(vfx, "mask_source", 'NONE') == 'FOG':
+                view_sock = om
         except Exception as e:
             import traceback
             print("VFX fog apply error:", e)
             traceback.print_exc()
 
-    # без тумана (grades already fed and masked inside ensure_layer_grades)
-    if not fog_done:
-        graded_sockets = []
-        for layer, kind, sock in sockets:
-            gsock = grade_nodes.get(layer.id) if kind == 'OBJ' else None
-            graded_sockets.append((layer, kind, gsock if gsock is not None else sock))
-        if bg_sock is not None:
-            current = bg_sock
-            mix_list = graded_sockets
-        else:
-            current = graded_sockets[0][2]
-            mix_list = graded_sockets[1:]
-
-        mix_index = 0
-        for layer, kind, sock in mix_list:
-            mix = nt.nodes.new("CompositorNodeAlphaOver")
-            mix.name = f"VFX_MIX_{mix_index:02d}"
-            mix.label = f"{layer.layer_name} {kind}"
-            mix["vfx_mix"] = 1
-            mix.location = (800, -mix_index * 200)
-
-            img = [s for s in mix.inputs if s.type == 'RGBA']
-            fac = [s for s in mix.inputs if s.type == 'VALUE']
-
-            if len(img) >= 2:
-                bg, fg = img[0], img[1]
-            else:
-                bg, fg = mix.inputs[1], mix.inputs[2]
-
-            mix_fac = 1.0
-            if kind == 'SHD':
-                mix_fac = getattr(layer, "shadow_strength", 1.0)
-            for f in fac:
-                try:
-                    f.default_value = mix_fac
-                except Exception:
-                    pass
-
-            nt.links.new(current, bg)
-            nt.links.new(sock, fg)
-
-            outs = [s for s in mix.outputs if s.type == 'RGBA']
-            current = outs[0] if outs else mix.outputs[0]
-            mix_index += 1
 
     _PX_DOF = 1400
     _PX_GLARE = 1700

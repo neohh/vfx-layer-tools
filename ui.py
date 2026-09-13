@@ -105,8 +105,6 @@ def _draw_layer_list(context, layout):
         rbg.only_background = True
         rbg.refresh_after = True
         r.operator("vfx.delete_background", text="", icon='X')
-        if vfx.use_fog:
-            r.prop(vfx, "bg_fog_factor", text="Fog")
 
     row = layout.row(align=True)
     row.operator("vfx.move_layer_up", icon='TRIA_UP', text="Up / Forward")
@@ -143,11 +141,7 @@ def _draw_layer_list(context, layout):
                 box.prop(layer, "shadow_strength")
 
         if fx == 'FOG' and vfx.use_fog:
-            box.prop(layer, "fog_factor")
-            fb = box.box()
-            fb.label(text="On shared fog map:", icon='MOD_MASK')
-            fb.prop(layer, "fog_map_bias", slider=True)
-            fb.prop(layer, "fog_map_gain", slider=True)
+            box.label(text="Fog is global — see FOG above", icon='FORCE_WIND')
 
         # ── OCCLUSION (holdout) ──
         obox = box.box()
@@ -306,17 +300,11 @@ def _draw_post_effects(context, layout):
         fr2 = fb.row(align=True)
         fr2.prop(vfx, "ramp_black")
         fr2.prop(vfx, "ramp_white")
-        fb.label(
-            text=(f"depth window: {vfx.mist_start:.1f} ... "
-                  f"{vfx.mist_start + vfx.mist_depth:.1f} m"),
-            icon='INFO'
-        )
-        fb.prop(vfx, "mist_start")
-        fb.prop(vfx, "mist_depth")
         fb.prop(vfx, "fog_strength")
         if vfx.fog_strength > 0.0:
             fb.prop(vfx, "fog_color", text="")
-        fb.prop(vfx, "bg_fog_factor")
+        fb.label(text="Fog curve: edit VFX FOG node > FOG MAP RAMP",
+                 icon='INFO')
         _draw_mask_section(context, fb, vfx, "fog", ('DEPTH', 'LUMA', 'EXT'))
     dofbox = layout.box()
     dh = dofbox.row(align=True)
