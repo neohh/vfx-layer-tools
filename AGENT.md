@@ -10,7 +10,7 @@
 - **Владелец:** neohh
 - **Ветка:** `main`
 - **gh CLI:** залогинен как `neohh` (авторизация через keyring)
-- **Текущая версия:** v3.7.0
+- **Текущая версия:** v3.8.0
 
 ## Где лежат файлы
 
@@ -131,7 +131,7 @@ gh release upload vX.Y.Z vfx_layer_tools_vX.Y.Z.zip --clobber
 1. **Создание слоёв:** Пользователь создаёт слои через UI → создаются отдельные сцены в Blender
 2. **Рендер:** `Render All Layers` → рендерит каждую сцену как EXR с pass'ами (Mist, Z, Normal)
 3. **Композитор:** `Rebuild Comp` → строит ноды в VFX_Compositor сцене из EXR файлов
-4. **Fog:** VFX_FOGMAP сцена рендерит live Z-глубину через EEVEE; слои собираются в стек (AlphaOver) и подаются в группу VFX_FogGroup: Depth → ColorRamp → Invert → Mix.Factor, Mix.A = Fog Color, Mix.B = собранные слои
+4. **Fog:** VFX_FOGMAP сцена рендерит live Z-глубину через EEVEE; слои собираются в стек (AlphaOver) и подаются в группу VFX_FogGroup (ровно по референсу, 4 ноды): Depth → MapRange(Ramp Black..Ramp White) → рампа FOG MAP RAMP → Invert(Color, Fac=1) → Mix.Factor; Mix.A = Fog Color, Mix.B = собранные слои; Mask out = выход рампы. Никаких Multiply/Strength/Extra Mask внутри группы
 5. **Auto-calibrate:** Анализирует реальную геометрию сцены → выставляет Mist Start/Depth
 
 ### Ключевые функции

@@ -1,14 +1,14 @@
 bl_info = {
     "name": "VFX Layer Tools",
     "author": "VFX Pipeline",
-    "version": (3, 7, 0),
+    "version": (3, 8, 0),
     "blender": (5, 2, 1),
     "location": "View3D > Sidebar > VFX",
     "description": "VFX layer / scene / compositing manager",
     "category": "Compositing",
 }
 
-VFX_VERSION = "3.7.0"
+VFX_VERSION = "3.8.0"
 
 import bpy
 import importlib
@@ -62,11 +62,6 @@ def _auto_mask(ctx, source):
             vfx.mask_source = source
     except Exception:
         pass
-
-
-def _fog_changed(ctx):
-    _auto_mask(ctx, 'FOG')
-    _trigger_comp(ctx)
 
 
 def _dof_changed(ctx):
@@ -355,11 +350,6 @@ class VFXProject(bpy.types.PropertyGroup):
         name="Mist Depth", default=50.0, min=0.1,
         update=lambda s, c: _update_mist(c)
     )
-    fog_strength: FloatProperty(
-        name="Density (global)", default=0.0, min=0.0, max=1.0,
-        description="Overall fog density, scales the shared fog map",
-        update=lambda s, c: _fog_changed(c)
-    )
     fog_color: FloatVectorProperty(
         name="Fog Color", subtype='COLOR', size=4,
         default=(0.7, 0.75, 0.85, 1.0), min=0.0, max=1.0,
@@ -392,41 +382,6 @@ class VFXProject(bpy.types.PropertyGroup):
         ),
         default='FOG',
         description="Which per-layer effect settings to show"
-    )
-    fog_mask_source: EnumProperty(
-        name="Fog Mask Source",
-        items=_MASK_SOURCE_ITEMS,
-        default='NONE',
-        update=lambda s, c: _trigger_comp(c)
-    )
-    fog_mask_invert: BoolProperty(
-        name="Invert Mask", default=False,
-        update=lambda s, c: _trigger_comp(c)
-    )
-    fog_mask_soft: FloatProperty(
-        name="Softness (px)", default=0.0, min=0.0, max=50.0,
-        update=lambda s, c: _trigger_comp(c)
-    )
-    fog_mask_depth_start: FloatProperty(
-        name="Depth Start (m)", default=0.0, min=0.0, max=1000.0,
-        update=lambda s, c: _trigger_comp(c)
-    )
-    fog_mask_depth_end: FloatProperty(
-        name="Depth End (m)", default=50.0, min=0.1, max=1000.0,
-        update=lambda s, c: _trigger_comp(c)
-    )
-    fog_mask_luma_lo: FloatProperty(
-        name="Luma Lo", default=0.0, min=0.0, max=1.0,
-        update=lambda s, c: _trigger_comp(c)
-    )
-    fog_mask_luma_hi: FloatProperty(
-        name="Luma Hi", default=1.0, min=0.0, max=1.0,
-        update=lambda s, c: _trigger_comp(c)
-    )
-    fog_mask_ext_node: StringProperty(
-        name="Ext Node", default="",
-        description="Name of a node in comp whose output is used as mask",
-        update=lambda s, c: _trigger_comp(c)
     )
     use_mask: BoolProperty(
         name="Show Mask",

@@ -988,26 +988,27 @@ def _fog_mix_node(ng, loc):
 
 
 def _build_fog_group2(vfx):
-    """VFX_FogGroup — minimal scheme (reference topology):
+    """VFX_FogGroup — EXACT reference topology, nothing extra:
 
         Depth (m) -> MapRange(Fog Start..Fog Full, clamped)
-                  -> ColorRamp (EDITABLE density curve: black=near, white=far)
-                  -> [* Strength] -> [* Extra Mask] -> density
-        density -> Invert -> Mix.Factor
-        Mix.A = Fog Color
-        Mix.B = Image input (layers assembled OUTSIDE the group)
+                  -> FOG MAP RAMP (editable ColorRamp)
+                  -> Invert (Color in, Fac = 1)
+                  -> Mix.Factor
+        Mix.A = Fog Color,  Mix.B = Image (layers assembled OUTSIDE)
 
-    Outputs: Image (fogged comp), Mask (fog density, white = dense).
+    Outputs: Image = Mix.Result, Mask = ramp output (the fog map).
+
+    That is the whole group — exactly the reference scheme. Density is
+    whatever the user draws on the ramp (incl. dark fog at near depths).
 
     The internals are built ONCE and then left alone, so the user's
     ColorRamp edits survive comp rebuilds. A rebuild happens only if the
     existing group is missing, still has the OLD socket set, or carries an
     older scheme version (ng["vfx_fog_version"] < VFX_FOG_SCHEME_VERSION).
     """
-    VFX_FOG_SCHEME_VERSION = 2  # 2 = Invert wired by socket name
+    VFX_FOG_SCHEME_VERSION = 3  # 3 = exact reference topology, no extra nodes
     ng = bpy.data.node_groups.get("VFX_FogGroup")
-    needed_inputs = {"Image", "Depth", "Strength", "Extra Mask",
-                     "Fog Color", "Ramp Black", "Ramp White"}
+    needed_inputs = {"Image", "Depth", "Fog Color", "Ramp Black", "Ramp White"}
     if ng is not None:
         try:
             have = {s.name for s in ng.interface.items_tree
@@ -1037,8 +1038,6 @@ def _build_fog_group2(vfx):
 
     ng.interface.new_socket("Image", in_out='INPUT', socket_type='NodeSocketColor')
     ng.interface.new_socket("Depth", in_out='INPUT', socket_type='NodeSocketFloat')
-    ng.interface.new_socket("Strength", in_out='INPUT', socket_type='NodeSocketFloat')
-    ng.interface.new_socket("Extra Mask", in_out='INPUT', socket_type='NodeSocketFloat')
     ng.interface.new_socket("Fog Color", in_out='INPUT', socket_type='NodeSocketColor')
     ng.interface.new_socket("Ramp Black", in_out='INPUT', socket_type='NodeSocketFloat')
     ng.interface.new_socket("Ramp White", in_out='INPUT', socket_type='NodeSocketFloat')
@@ -1052,13 +1051,6 @@ def _build_fog_group2(vfx):
 
     def g_in(name):
         return gin.outputs.get(name)
-
-    def math_node(op, loc):
-        m = _new_node(ng, "CompositorNodeMath", "ShaderNodeMath")
-        if m is not None:
-            m.operation = op
-            m.location = loc
-        return m
 
     # meters -> 0..1 over the Fog Start..Fog Full window.
     # MapRange clamps by itself, no division anywhere -> factor can never
@@ -1096,32 +1088,16 @@ def _build_fog_group2(vfx):
         pass
     ng.links.new(mr.outputs.get("Result"), ramp.inputs[0])
 
-    # Strength scales the DENSITY (not the inverted factor!), otherwise
-    # Strength = 0 would mean "wall of fog everywhere".
-    fog_fac = math_node('MULTIPLY', (-300, 250))
-    if fog_fac is None:
-        return ng
-    ng.links.new(ramp.outputs[0], fog_fac.inputs[0])
-    ng.links.new(g_in("Strength"), fog_fac.inputs[1])
-
-    em = g_in("Extra Mask")
-    if em is not None:
-        fm2 = math_node('MULTIPLY', (-100, 250))
-        if fm2 is not None:
-            ng.links.new(fog_fac.outputs[0], fm2.inputs[0])
-            ng.links.new(em, fm2.inputs[1])
-            fog_fac = fm2
-    density_sock = fog_fac.outputs[0]
-
-    # invert: density -> mix factor (1 = clear layers, 0 = fog color)
-    # NOTE: the compositor Invert node has sockets [Factor, Color] — wire by
-    # NAME. By index, density would land in 'Factor' (the inversion amount)
-    # and 'Color' would stay black: factor = 1 - 0*... = 1 everywhere, i.e.
-    # the fog mix would pass the layers through untouched at every depth.
+    # invert: ramp -> mix factor (1 = clear layers, 0 = fog color).
+    # Reference topology: NOTHING between the ramp and the invert — no
+    # Multiply nodes. NOTE: the compositor Invert node has sockets
+    # [Factor, Color] — wire by NAME. By index, the map would land in
+    # 'Factor' (the inversion amount) and 'Color' would stay black:
+    # output = constant 1, fog would never act at any depth.
     inv = _new_node(ng, "CompositorNodeInvert", "ShaderNodeInvert")
     if inv is None:
         return ng
-    inv.location = (100, 250)
+    inv.location = (-300, 250)
     inv.name = "VFX_FOG_INV"
     inv.label = "density -> mix factor"
     try:
@@ -1133,7 +1109,7 @@ def _build_fog_group2(vfx):
     if inv_color_in is None or inv_color_out is None:
         inv_color_in = inv.inputs[-1]
         inv_color_out = inv.outputs[-1]
-    ng.links.new(density_sock, inv_color_in)
+    ng.links.new(ramp.outputs[0], inv_color_in)
     factor_sock = inv_color_out
 
     # ── MIX (reference scheme): Fac = inverted map, A = Fog Color,
@@ -1192,8 +1168,8 @@ def _build_fog_group2(vfx):
         ng.links.new(img_out, oi)
     mk_out = gout.inputs.get("Mask")
     if mk_out is not None:
-        # Mask out = fog DENSITY (white = dense fog) for preview/masks
-        ng.links.new(density_sock, mk_out)
+        # Mask out = the fog map itself (ramp output; white = dense fog)
+        ng.links.new(ramp.outputs[0], mk_out)
 
     ng["vfx_fog_version"] = VFX_FOG_SCHEME_VERSION
     return ng
@@ -1404,31 +1380,11 @@ def build_comp_assembly(vfx, master, nt=None):
                 else:
                     sd.default_value = 0.0
 
-            for name, val in (("Strength", vfx.fog_strength),
-                              ("Ramp Black", ramp_black),
+            for name, val in (("Ramp Black", ramp_black),
                               ("Ramp White", ramp_white)):
                 s = gi(name)
                 if s is not None:
                     s.default_value = val
-
-            # Optional extra mask on fog (from MASK_* chain)
-            try:
-                em = gi("Extra Mask")
-                fmask = build_mask(
-                    nt, vfx, "FOG", getattr(vfx, "fog_mask_source", 'NONE'),
-                    vfx.fog_mask_invert, vfx.fog_mask_soft,
-                    vfx.fog_mask_depth_start, vfx.fog_mask_depth_end,
-                    vfx.fog_mask_luma_lo, vfx.fog_mask_luma_hi,
-                    ext_node=vfx.fog_mask_ext_node, image_sock=depth_sock)
-                if em is not None:
-                    if fmask is not None:
-                        relink(em, fmask)
-                    else:
-                        em.default_value = 1.0
-                    if fmask is not None and getattr(vfx, "use_mask", False) and getattr(vfx, "mask_source", 'NONE') == 'FOG':
-                        view_sock = fmask
-            except Exception as e:
-                print("VFX fog mask error:", e)
 
             scol = gi("Fog Color")
             if scol is not None:
@@ -1817,13 +1773,6 @@ def _self_check_masks(nt, vfx):
             lines.append(f"  {prefix}: Mix(fac=MASK) linked={ok}")
             if not ok:
                 problems.append(f"{prefix}: mask mix missing or unlinked")
-    if getattr(vfx, "use_fog", False) and getattr(vfx, "fog_mask_source", 'NONE') != 'NONE':
-        fg = nt.nodes.get("VFX_FOG_GROUP")
-        em = fg.inputs.get("Extra Mask") if fg is not None else None
-        ok = em is not None and em.is_linked
-        lines.append(f"  FOG: Extra Mask linked={ok}")
-        if not ok:
-            problems.append("FOG: Extra Mask input unlinked")
     for layer in getattr(vfx, "layers", []):
         if getattr(layer, "grade_enable", False):
             src = getattr(layer, "grade_mask_source", 'NONE')

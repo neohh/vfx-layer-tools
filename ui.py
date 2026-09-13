@@ -300,14 +300,11 @@ def _draw_post_effects(context, layout):
         fr2 = fb.row(align=True)
         fr2.prop(vfx, "ramp_black")
         fr2.prop(vfx, "ramp_white")
-        fb.prop(vfx, "fog_strength")
-        if vfx.fog_strength > 0.0:
-            fb.prop(vfx, "fog_color", text="")
+        fb.prop(vfx, "fog_color", text="Fog Color")
         fb.label(text="Fog curve: edit VFX FOG node > FOG MAP RAMP",
                  icon='INFO')
         fb.label(text="Dark fog: pull ramp black stop up / raise its color",
                  icon='INFO')
-        _draw_mask_section(context, fb, vfx, "fog", ('DEPTH', 'LUMA', 'EXT'))
     dofbox = layout.box()
     dh = dofbox.row(align=True)
     dh.prop(vfx, "use_dof", text="")
