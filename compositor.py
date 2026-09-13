@@ -1210,8 +1210,8 @@ def build_comp_assembly(vfx, master, nt=None):
     _cleanup_fog_nodes(nt)
     _cleanup_mask_nodes(nt)
     _remove_vfx_nodes(nt, "VFX_BLUR", "VFX_BLURRAMP", "VFX_BLURMATH")
-    # Fog ramp: user values are METERS from the camera. The group maps Z
-    # depth directly: near -> clear, far -> full fog color (clamped).
+    # Fog ramp: user values are METERS from the camera. The group maps the
+    # mist-derived distance: near -> clear, far -> full fog color (clamped).
     # Heal garbage left from older versions before it reaches the nodes.
     ramp_black = max(0.0, float(vfx.ramp_black))
     ramp_white = float(vfx.ramp_white)
@@ -1326,37 +1326,42 @@ def build_comp_assembly(vfx, master, nt=None):
             if current is None:
                 raise RuntimeError("no layer stack to fog")
             _ensure_fogmap(nt, vfx, master)
-            depth_sock = _get_depth_socket(nt)
-            depth_is_z = depth_sock is not None
-            if depth_sock is None:
-                # Fallback: synthesize meters from the mist fraction
-                # (Z = Mist Start + mist * Mist Depth).
-                fm_node = nt.nodes.get("VFX_RL_FOGMAP")
-                mist_out = fm_node.outputs.get("Mist") if fm_node else None
-                if mist_out is not None:
-                    fb = nt.nodes.get("VFX_FOG_DEPTH_FB")
-                    if fb is not None and fb.type != 'MAP_RANGE':
-                        nt.nodes.remove(fb)
-                        fb = None
-                    if fb is None:
-                        fb = _new_node(nt, "ShaderNodeMapRange",
-                                       "CompositorNodeMapRange")
-                        if fb is not None:
-                            fb.name = "VFX_FOG_DEPTH_FB"
-                            fb.label = "mist -> meters"
+            # Fog is driven by the MIST pass (0 near .. 1 far) — like the
+            # original scheme — NOT the raw Z pass. Mist fraction -> meters:
+            # Z = Mist Start + mist * Mist Depth (world mist hits 1.0
+            # exactly at Start + Depth).
+            fm_node = nt.nodes.get("VFX_RL_FOGMAP")
+            mist_out = fm_node.outputs.get("Mist") if fm_node else None
+            depth_sock = None
+            depth_is_z = False
+            if mist_out is None:
+                # last resort only: true meters from the Z pass
+                depth_sock = _get_depth_socket(nt)
+                depth_is_z = depth_sock is not None
+            if mist_out is not None:
+                fb = nt.nodes.get("VFX_FOG_DEPTH_FB")
+                if fb is not None and fb.type != 'MAP_RANGE':
+                    nt.nodes.remove(fb)
+                    fb = None
+                if fb is None:
+                    fb = _new_node(nt, "ShaderNodeMapRange",
+                                   "CompositorNodeMapRange")
                     if fb is not None:
-                        fb.location = (-350, 600)
-                        for name, val in (("From Min", 0.0), ("From Max", 1.0),
-                                          ("To Min", float(vfx.mist_start)),
-                                          ("To Max", float(vfx.mist_start)
-                                           + max(0.1, float(vfx.mist_depth)))):
-                            s = fb.inputs.get(name)
-                            if s is not None:
-                                s.default_value = val
-                        for l in list(fb.inputs.get("Value").links):
-                            nt.links.remove(l)
-                        nt.links.new(mist_out, fb.inputs.get("Value"))
-                        depth_sock = fb.outputs.get("Result")
+                        fb.name = "VFX_FOG_DEPTH_FB"
+                        fb.label = "mist -> meters"
+                if fb is not None:
+                    fb.location = (-350, 600)
+                    for name, val in (("From Min", 0.0), ("From Max", 1.0),
+                                      ("To Min", float(vfx.mist_start)),
+                                      ("To Max", float(vfx.mist_start)
+                                       + max(0.1, float(vfx.mist_depth)))):
+                        s = fb.inputs.get(name)
+                        if s is not None:
+                            s.default_value = val
+                    for l in list(fb.inputs.get("Value").links):
+                        nt.links.remove(l)
+                    nt.links.new(mist_out, fb.inputs.get("Value"))
+                    depth_sock = fb.outputs.get("Result")
 
             ng = _build_fog_group2(vfx)
             gnode = nt.nodes.get("VFX_FOG_GROUP")
@@ -1416,7 +1421,7 @@ def build_comp_assembly(vfx, master, nt=None):
                 fog_done = True
                 print(f"[VFX fog] assembled stack ({mix_index} over-nodes) "
                       f"-> fog group, depth source: "
-                      f"{'Z' if depth_is_z else 'mist fallback'}")
+                      f"{'Z (no mist pass!)' if depth_is_z else 'mist'}")
             om = gnode.outputs.get("Mask")
             if om is not None and getattr(vfx, "use_mask", False) and getattr(vfx, "mask_source", 'NONE') == 'FOG':
                 view_sock = om
