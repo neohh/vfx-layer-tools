@@ -1001,8 +1001,10 @@ def _build_fog_group2(vfx):
 
     The internals are built ONCE and then left alone, so the user's
     ColorRamp edits survive comp rebuilds. A rebuild happens only if the
-    existing group is missing or still has the OLD socket set.
+    existing group is missing, still has the OLD socket set, or carries an
+    older scheme version (ng["vfx_fog_version"] < VFX_FOG_SCHEME_VERSION).
     """
+    VFX_FOG_SCHEME_VERSION = 2  # 2 = Invert wired by socket name
     ng = bpy.data.node_groups.get("VFX_FogGroup")
     needed_inputs = {"Image", "Depth", "Strength", "Extra Mask",
                      "Fog Color", "Ramp Black", "Ramp White"}
@@ -1012,7 +1014,11 @@ def _build_fog_group2(vfx):
                     if hasattr(s, "in_out") and s.in_out == 'INPUT'}
         except Exception:
             have = set()
-        if needed_inputs.issubset(have):
+        try:
+            scheme = int(ng.get("vfx_fog_version", 0))
+        except Exception:
+            scheme = 0
+        if needed_inputs.issubset(have) and scheme >= VFX_FOG_SCHEME_VERSION:
             return ng  # modern group already built — keep user's ramp edits
         # old-scheme group (per-layer OBJ_/AL_/F_ sockets...) — purge it
         try:
@@ -1108,13 +1114,27 @@ def _build_fog_group2(vfx):
     density_sock = fog_fac.outputs[0]
 
     # invert: density -> mix factor (1 = clear layers, 0 = fog color)
+    # NOTE: the compositor Invert node has sockets [Factor, Color] — wire by
+    # NAME. By index, density would land in 'Factor' (the inversion amount)
+    # and 'Color' would stay black: factor = 1 - 0*... = 1 everywhere, i.e.
+    # the fog mix would pass the layers through untouched at every depth.
     inv = _new_node(ng, "CompositorNodeInvert", "ShaderNodeInvert")
     if inv is None:
         return ng
     inv.location = (100, 250)
     inv.name = "VFX_FOG_INV"
-    ng.links.new(density_sock, inv.inputs[0])
-    factor_sock = inv.outputs[0]
+    inv.label = "density -> mix factor"
+    try:
+        inv.inputs["Fac"].default_value = 1.0  # full inversion
+    except Exception:
+        pass
+    inv_color_in = inv.inputs.get("Color")
+    inv_color_out = inv.outputs.get("Color")
+    if inv_color_in is None or inv_color_out is None:
+        inv_color_in = inv.inputs[-1]
+        inv_color_out = inv.outputs[-1]
+    ng.links.new(density_sock, inv_color_in)
+    factor_sock = inv_color_out
 
     # ── MIX (reference scheme): Fac = inverted map, A = Fog Color,
     #    B = assembled layers ──
@@ -1175,6 +1195,7 @@ def _build_fog_group2(vfx):
         # Mask out = fog DENSITY (white = dense fog) for preview/masks
         ng.links.new(density_sock, mk_out)
 
+    ng["vfx_fog_version"] = VFX_FOG_SCHEME_VERSION
     return ng
 
 
