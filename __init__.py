@@ -1,14 +1,14 @@
 bl_info = {
     "name": "VFX Layer Tools",
     "author": "VFX Pipeline",
-    "version": (3, 10, 0),
+    "version": (3, 11, 0),
     "blender": (5, 2, 1),
     "location": "View3D > Sidebar > VFX",
     "description": "VFX layer / scene / compositing manager",
     "category": "Compositing",
 }
 
-VFX_VERSION = "3.10.0"
+VFX_VERSION = "3.11.0"
 
 import bpy
 import importlib
@@ -396,9 +396,47 @@ class VFXProject(bpy.types.PropertyGroup):
         update=lambda s, c: _trigger_comp(c)
     )
     crypto_pick_name: StringProperty(
-        name="Picked Object",
-        description="Object picked with the Cryptomatte pipette",
+        name="Picked Objects",
+        description="Objects picked with the Cryptomatte pipette (| separated)",
         default=""
+    )
+    crypto_amount: FloatProperty(
+        name="Influence Amount",
+        description="How much to change the effect on picked objects: "
+                    "+ = stronger (fog denser), − = weaker (fog clears). "
+                    "0 = off",
+        default=0.0, min=-1.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    crypto_on_fog: BoolProperty(
+        name="Crypto Influence",
+        description="Boost/reduce fog on picked objects",
+        default=False,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    crypto_on_dof: BoolProperty(
+        name="Crypto Influence",
+        description="Boost/reduce DOF blur on picked objects",
+        default=False,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    crypto_on_glare: BoolProperty(
+        name="Crypto Influence",
+        description="Boost/reduce glare on picked objects",
+        default=False,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    crypto_on_grade: BoolProperty(
+        name="Crypto Influence",
+        description="Boost/reduce master grade on picked objects",
+        default=False,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    crypto_on_colormatch: BoolProperty(
+        name="Crypto Influence",
+        description="Boost/reduce color match on picked objects",
+        default=False,
+        update=lambda s, c: _trigger_comp(c)
     )
     use_color_match: BoolProperty(
         name="Color Match / Plate",

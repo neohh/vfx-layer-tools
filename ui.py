@@ -236,6 +236,27 @@ def _draw_layer_list(context, layout):
                     r3.prop(layer, "grade_mask_soft")
 
 
+def _draw_crypto_influence(context, layout, vfx, prop_name):
+    """Compact crypto-influence toggle + amount for one effect.
+    When on, also shows the shared picker row with the picked set."""
+    if not getattr(vfx, prop_name, False) and abs(float(getattr(vfx, "crypto_amount", 0.0) or 0.0)) <= 0.001:
+        row = layout.row(align=True)
+        row.prop(vfx, prop_name, text="", icon='EYEDROPPER', toggle=True)
+        row.label(text="Crypto Influence", icon='BLANK1')
+        return
+    box = layout.box()
+    box.prop(vfx, prop_name, icon='EYEDROPPER', toggle=True)
+    box.prop(vfx, "crypto_amount")
+    pk = box.row(align=True)
+    pk.operator("vfx.pick_cryptomatte", text="Pick Objects", icon='EYEDROPPER').target = 'INFLUENCE'
+    names = [n for n in (getattr(vfx, "crypto_pick_name", "") or "").split("|") if n.strip()]
+    if names:
+        shown = ", ".join(names[:3]) + (f" +{len(names) - 3}" if len(names) > 3 else "")
+        box.label(text=shown, icon='OBJECT_DATA')
+    else:
+        box.label(text="nothing picked yet", icon='INFO')
+
+
 def _draw_mask_section(context, layout, vfx, prefix, sources):
     """Unified MASK sub-section for a masked effect (props: <prefix>_mask_*)."""
     src = getattr(vfx, prefix + "_mask_source", 'NONE')
@@ -306,6 +327,7 @@ def _draw_post_effects(context, layout):
                  icon='INFO')
         fb.label(text="Dark fog: pull ramp black stop up / raise its color",
                  icon='INFO')
+        _draw_crypto_influence(context, fb, vfx, "crypto_on_fog")
     dofbox = layout.box()
     dh = dofbox.row(align=True)
     dh.prop(vfx, "use_dof", text="")
@@ -318,6 +340,7 @@ def _draw_post_effects(context, layout):
         dr.prop(vfx, "dof_far_end")
         dc.prop(vfx, "dof_maxblur")
         dc.label(text="Ramp: edit DOF FOCUS RAMP node in comp", icon='INFO')
+        _draw_crypto_influence(context, dc, vfx, "crypto_on_dof")
         _draw_mask_section(context, dc, vfx, "dof", ('ALPHA', 'DEPTH', 'LUMA', 'EXT'))
     glowbox = layout.box()
     gr = glowbox.row(align=True)
@@ -329,6 +352,7 @@ def _draw_post_effects(context, layout):
         gc.prop(vfx, "glare_strength")
         gc.prop(vfx, "glare_threshold")
         gc.prop(vfx, "glare_size")
+        _draw_crypto_influence(context, gc, vfx, "crypto_on_glare")
         _draw_mask_section(context, gc, vfx, "glare", ('ALPHA', 'DEPTH', 'LUMA', 'EXT'))
     ldbox = layout.box()
     lbw = ldbox.row(align=True)
@@ -356,6 +380,7 @@ def _draw_post_effects(context, layout):
         row_btn = mgbox.row(align=True)
         row_btn.operator("vfx.reset_master_grade", icon='LOOP_BACK')
         row_btn.operator("vfx.copy_master_grade", icon='COPYDOWN')
+        _draw_crypto_influence(context, mgc, vfx, "crypto_on_grade")
         _draw_mask_section(context, mgc, vfx, "grade", ('ALPHA', 'DEPTH', 'LUMA', 'EXT'))
 
 def _draw_advanced_features(context, layout):
@@ -375,6 +400,7 @@ def _draw_advanced_features(context, layout):
         for preset_id in ('WARM', 'TEAL_ORANGE', 'COOL', 'FILM'):
             op = crow.operator("vfx.apply_color_preset", text=preset_id.replace('_', ' ').title())
             op.preset = preset_id
+        _draw_crypto_influence(context, cmc, vfx, "crypto_on_colormatch")
 
     # Light Groups
     box = layout.box()

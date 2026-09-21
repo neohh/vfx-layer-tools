@@ -551,7 +551,8 @@ def _set_maprange(mr, lo, hi):
 
 def build_mask(nt, props, name_prefix, source, invert, soft,
                depth_start, depth_end, luma_lo, luma_hi,
-               ext_node="", image_sock=None, depth_sock=None):
+               ext_node="", image_sock=None, depth_sock=None,
+               crypto_on=False, crypto_amount=1.0, crypto_y=0.0):
     """Build (or reuse) a mask chain and return a float socket 0..1.
 
     All nodes are named MASK_<name_prefix>* and reused on rebuild.
@@ -635,6 +636,73 @@ def build_mask(nt, props, name_prefix, source, invert, soft,
         sock = _math_node(nt, 'SUBTRACT', None, sock, f"MASK_{name_prefix}_INV", (-2400, 0))
         if sock is not None:
             sock.node.inputs[0].default_value = 1.0
+
+    # Crypto influence modulation: lift/dip the mask over picked objects.
+    # amount > 0  -> SCREEN:  mask*(1-amt) + amt   (brighten = MORE effect)
+    # amount < 0  -> MULTIPLY: mask*(1+amt)        (darken   = LESS effect)
+    # One MixRGB node, created only when the feature is actually on.
+    try:
+        crypto_amount = float(crypto_amount or 0.0)
+    except Exception:
+        crypto_amount = 0.0
+    if crypto_on and sock is not None and abs(crypto_amount) > 0.001:
+        master = getattr(props, 'master_scene', None) or bpy.context.scene
+        names = [n.strip() for n in (getattr(props, 'crypto_pick_name', '') or '').split('|')
+                 if n.strip()]
+        cnode = _ensure_crypto_influence(vfx=props, master=master, nt=nt, obj_names=names)
+        if cnode is not None:
+            csock = None
+            for s in cnode.outputs:
+                if s.type in ('VALUE', 'RGBA'):
+                    csock = s
+                    break
+            if csock is not None and csock.type == 'RGBA':
+                csock = _to_float(nt, csock, name_prefix + "CI", (-2600, -300))
+            if csock is not None:
+                try:
+                    amt = max(-0.99, min(1.0, crypto_amount))
+                    mul = _new_node(nt, "CompositorNodeMixRGB", "ShaderNodeMix")
+                    if mul is not None:
+                        mul.name = f"MASK_{name_prefix}_CI"
+                        mul.label = f"MASK {name_prefix} crypto"
+                        mul.location = (-2450, crypto_y - 150)
+                        try:
+                            mul.data_type = 'RGBA'
+                        except Exception:
+                            pass
+                        try:
+                            mul.blend_type = 'SCREEN' if amt >= 0.0 else 'MULTIPLY'
+                        except Exception:
+                            pass
+                        a_in = b_in = f_in = None
+                        for s in mul.inputs:
+                            if f_in is None and s.type == 'VALUE' and s.name in ('Factor', 'Fac'):
+                                f_in = s
+                            if s.type == 'RGBA' and s.name == 'A':
+                                a_in = s
+                            if s.type == 'RGBA' and s.name == 'B':
+                                b_in = s
+                        out_s = None
+                        for s in mul.outputs:
+                            if s.type == 'RGBA':
+                                out_s = s
+                                break
+                        if a_in is not None:
+                            for l in list(a_in.links):
+                                nt.links.remove(l)
+                            nt.links.new(sock, a_in)
+                        if b_in is not None:
+                            v = amt if amt >= 0.0 else (1.0 - amt)
+                            b_in.default_value = (v, v, v, 1.0)
+                            for l in list(b_in.links):
+                                nt.links.remove(l)
+                            nt.links.new(csock, b_in)
+                        if f_in is not None:
+                            f_in.default_value = 1.0
+                        if out_s is not None:
+                            sock = out_s
+                except Exception as e:
+                    print("VFX crypto modulate error:", name_prefix, e)
 
     # Softness: tiny blur rounds mask edges
     try:
@@ -899,6 +967,78 @@ def _set_socket(node, name, value):
     return False
 
 
+# ---------------------------------------------------------------------
+# CRYPTO INFLUENCE — shared cryptomatte mask of picked objects,
+# used to modulate any effect (fog / DOF / glare / grade / color match)
+# ---------------------------------------------------------------------
+
+CRYPTO_INFL_NODE = "VFX_CRYPTO_INFL"
+
+
+def _ensure_fogmap_crypto_pass(vfx):
+    """Object cryptomatte pass on the live FOGMAP scene (whole-scene matte)."""
+    fm = getattr(vfx, "fog_map_scene", None)
+    if fm is not None:
+        for vl in fm.view_layers:
+            try:
+                vl.use_pass_cryptomatte_object = True
+            except Exception:
+                pass
+
+
+def _ensure_crypto_influence(vfx, master, nt, obj_names):
+    """Create/update VFX_CRYPTO_INFL — a Cryptomatte node fed by the live
+    FOGMAP render layer, with all picked object names added as matte IDs.
+    Output is 1 inside the picked objects, 0 elsewhere.
+
+    Named 'VFX_CRYPTO_INFL' so it is NOT purged by build_comp_assembly
+    (which removes every other CRYPTOMATTE node) and it is clearly distinct
+    from the legacy single-object VFX_CRYPTO_PICK node.
+    """
+    if not obj_names:
+        return None
+    _ensure_fogmap_crypto_pass(vfx)
+    node = nt.nodes.get(CRYPTO_INFL_NODE)
+    if node is None:
+        try:
+            node = nt.nodes.new("CompositorNodeCryptomatte")
+        except Exception:
+            return None
+        node.name = CRYPTO_INFL_NODE
+        node.label = "CRYPTO INFLUENCE (picked)"
+        node.location = (-350, -700)
+    fm_node = nt.nodes.get("VFX_RL_FOGMAP")
+    if fm_node is not None and node.inputs:
+        img_in = node.inputs.get("Image") or node.inputs[0]
+        for l in list(img_in.links):
+            nt.links.remove(l)
+        try:
+            nt.links.new(fm_node.outputs.get("Image") or fm_node.outputs[0], img_in)
+        except Exception:
+            pass
+    try:
+        node.layer_name = "CryptoObject00"
+    except Exception:
+        pass
+    # add_name on an existing entry refreshes it; rebuild the list safely
+    try:
+        existing = [it.name for it in node.entries]
+    except Exception:
+        existing = []
+    for name in list(existing):
+        if name not in obj_names:
+            try:
+                node.remove_name(name)
+            except Exception:
+                pass
+    for name in obj_names:
+        try:
+            node.add_name(name)
+        except Exception as e:
+            print("VFX crypto infl: add_name failed:", name, e)
+    return node
+
+
 def _set_glare_type(node, glare_type):
     """Set the Glare type via the 'Type' MENU input socket.
     The addon enum values: BLOOM, FOG_GLOW, STREAKS, GHOSTS
@@ -1006,9 +1146,10 @@ def _build_fog_group2(vfx):
     existing group is missing, still has the OLD socket set, or carries an
     older scheme version (ng["vfx_fog_version"] < VFX_FOG_SCHEME_VERSION).
     """
-    VFX_FOG_SCHEME_VERSION = 4  # 4 = reference topology + Density (MapRange To Max)
+    VFX_FOG_SCHEME_VERSION = 5  # 5 = reference topology + Density + Crypto influence
     ng = bpy.data.node_groups.get("VFX_FogGroup")
-    needed_inputs = {"Image", "Depth", "Fog Color", "Ramp Black", "Ramp White", "Density"}
+    needed_inputs = {"Image", "Depth", "Fog Color", "Ramp Black", "Ramp White", "Density",
+                     "Crypto", "Crypto Mask"}
     if ng is not None:
         try:
             have = {s.name for s in ng.interface.items_tree
@@ -1043,6 +1184,9 @@ def _build_fog_group2(vfx):
     ng.interface.new_socket("Ramp White", in_out='INPUT', socket_type='NodeSocketFloat')
     # Density: global multiplier, enters via MapRange To Max (NO extra node)
     ng.interface.new_socket("Density", in_out='INPUT', socket_type='NodeSocketFloat')
+    # Crypto influence on picked objects (0..1)
+    ng.interface.new_socket("Crypto", in_out='INPUT', socket_type='NodeSocketFloat')
+    ng.interface.new_socket("Crypto Mask", in_out='INPUT', socket_type='NodeSocketFloat')
     ng.interface.new_socket("Image", in_out='OUTPUT', socket_type='NodeSocketColor')
     ng.interface.new_socket("Mask", in_out='OUTPUT', socket_type='NodeSocketFloat')
 
@@ -1100,12 +1244,73 @@ def _build_fog_group2(vfx):
         pass
     ng.links.new(mr.outputs.get("Result"), ramp.inputs[0])
 
+    # ── Crypto influence: brighten (+) or darken (−) the fog map over the
+    # picked objects. 0..1 → MapRange(To Min=0, To Max=Crypto) → Mix(MULTIPLY)
+    # with B = white 1−Crypto. Crypto=0 → B = white → pass-through:
+    # the shared map is untouched everywhere except the picked objects.
+    cin = _new_node(ng, "CompositorNodeMixRGB", "ShaderNodeMix")
+    if cin is None:
+        return ng
+    cin.location = (-500, -150)
+    cin.name = "VFX_FOG_CRYPTO"
+    cin.label = "crypto influence"
+    try:
+        cin.data_type = 'RGBA'
+    except Exception:
+        pass
+    try:
+        cin.blend_type = 'MULTIPLY'
+    except Exception:
+        pass
+    ca_in = cb_in = cf_in = None
+    for s in cin.inputs:
+        if cf_in is None and s.type == 'VALUE' and s.name in ('Factor', 'Fac'):
+            cf_in = s
+        if s.type == 'RGBA' and s.name == 'A':
+            ca_in = s
+        if s.type == 'RGBA' and s.name == 'B':
+            cb_in = s
+    ng.links.new(ramp.outputs[0], ca_in)
+    cin_mr = _new_node(ng, "ShaderNodeMapRange", "CompositorNodeMapRange")
+    if cin_mr is not None:
+        cin_mr.location = (-700, -250)
+        cin_mr.name = "VFX_FOG_CRYPTO_MR"
+        try:
+            cin_mr.clamp = True
+        except Exception:
+            pass
+        try:
+            cin_mr.inputs.get("To Min").default_value = 0.0
+        except Exception:
+            pass
+        try:
+            ng.links.new(g_in("Crypto"), cin_mr.inputs.get("To Max"))
+        except Exception:
+            pass
+        try:
+            ng.links.new(g_in("Crypto Mask"), cin_mr.inputs.get("Value"))
+        except Exception:
+            pass
+        try:
+            ng.links.new(cin_mr.outputs.get("Result"), cb_in)
+        except Exception:
+            pass
+    try:
+        cb_in.default_value = (1.0, 1.0, 1.0, 1.0)
+    except Exception:
+        pass
+    try:
+        cf_in.default_value = 1.0
+    except Exception:
+        pass
+    map_sock = cin.outputs[0] if cin.outputs else ramp.outputs[0]
+
     # invert: ramp -> mix factor (1 = clear layers, 0 = fog color).
-    # Reference topology: NOTHING between the ramp and the invert — no
-    # Multiply nodes. NOTE: the compositor Invert node has sockets
-    # [Factor, Color] — wire by NAME. By index, the map would land in
-    # 'Factor' (the inversion amount) and 'Color' would stay black:
-    # output = constant 1, fog would never act at any depth.
+    # Reference topology: NOTHING else between the ramp and the invert.
+    # NOTE: the compositor Invert node has sockets [Factor, Color] — wire
+    # by NAME. By index, the map would land in 'Factor' (the inversion
+    # amount) and 'Color' would stay black: output = constant 1, fog would
+    # never act at any depth.
     inv = _new_node(ng, "CompositorNodeInvert", "ShaderNodeInvert")
     if inv is None:
         return ng
@@ -1121,7 +1326,7 @@ def _build_fog_group2(vfx):
     if inv_color_in is None or inv_color_out is None:
         inv_color_in = inv.inputs[-1]
         inv_color_out = inv.outputs[-1]
-    ng.links.new(ramp.outputs[0], inv_color_in)
+    ng.links.new(map_sock, inv_color_in)
     factor_sock = inv_color_out
 
     # ── MIX (reference scheme): Fac = inverted map, A = Fog Color,
@@ -1180,8 +1385,8 @@ def _build_fog_group2(vfx):
         ng.links.new(img_out, oi)
     mk_out = gout.inputs.get("Mask")
     if mk_out is not None:
-        # Mask out = the fog map itself (ramp output; white = dense fog)
-        ng.links.new(ramp.outputs[0], mk_out)
+        # Mask out = the fog map after crypto influence (white = dense fog)
+        ng.links.new(map_sock, mk_out)
 
     ng["vfx_fog_version"] = VFX_FOG_SCHEME_VERSION
     return ng
@@ -1226,7 +1431,7 @@ def build_comp_assembly(vfx, master, nt=None):
         print(f"[VFX fog] depth ramp: clear up to {ramp_black:.1f} m, "
               f"full fog at {ramp_white:.1f} m")
     for node in list(nt.nodes):
-        if node.type == 'CRYPTOMATTE' and node.name != "VFX_CRYPTO_PICK":
+        if node.type == 'CRYPTOMATTE' and node.name not in ("VFX_CRYPTO_PICK", CRYPTO_INFL_NODE):
             nt.nodes.remove(node)
     # ── COMPUTED STACKING ORDER (back -> front) ──
     # AUTO: by camera distance (nearest layer on top) | MANUAL: list order.
@@ -1407,6 +1612,29 @@ def build_comp_assembly(vfx, master, nt=None):
             if dens is not None:
                 dens.default_value = float(getattr(vfx, "fog_density", 1.0))
 
+            # Crypto influence: brighten/darken fog over picked objects
+            cmask_in = gi("Crypto Mask")
+            if cmask_in is not None:
+                cact = (bool(getattr(vfx, "crypto_on_fog", False))
+                        and abs(float(getattr(vfx, "crypto_amount", 0.0) or 0.0)) > 0.001)
+                if cact:
+                    for l in list(cmask_in.links):
+                        nt.links.remove(l)
+                    names = [n.strip() for n in (getattr(vfx, "crypto_pick_name", "") or "").split("|")
+                             if n.strip()]
+                    cnode = _ensure_crypto_influence(vfx, master, nt, names)
+                    if cnode is not None and cnode.outputs:
+                        try:
+                            nt.links.new(cnode.outputs[0], cmask_in)
+                        except Exception as e:
+                            print("VFX fog crypto link error:", e)
+                else:
+                    for l in list(cmask_in.links):
+                        nt.links.remove(l)
+                cin_sock = gi("Crypto")
+                if cin_sock is not None:
+                    cin_sock.default_value = float(getattr(vfx, "crypto_amount", 0.0) or 0.0)
+
             scol = gi("Fog Color")
             if scol is not None:
                 try:
@@ -1526,7 +1754,10 @@ def build_comp_assembly(vfx, master, nt=None):
                             vfx.dof_mask_depth_start, vfx.dof_mask_depth_end,
                             vfx.dof_mask_luma_lo, vfx.dof_mask_luma_hi,
                             ext_node=vfx.dof_mask_ext_node, image_sock=orig_in,
-                            depth_sock=depth_b)
+                            depth_sock=depth_b,
+                            crypto_on=getattr(vfx, "crypto_on_dof", False),
+                            crypto_amount=getattr(vfx, "crypto_amount", 0.0),
+                            crypto_y=_PY + 150)
                         current = _apply_mask(nt, "DOF", orig_in, blurred, msock, _PY)
                         if msock is not None and getattr(vfx, "use_mask", False) and getattr(vfx, "mask_source", 'NONE') == 'DOF':
                             view_sock = msock
@@ -1568,7 +1799,10 @@ def build_comp_assembly(vfx, master, nt=None):
                     vfx.glare_mask_invert, vfx.glare_mask_soft,
                     vfx.glare_mask_depth_start, vfx.glare_mask_depth_end,
                     vfx.glare_mask_luma_lo, vfx.glare_mask_luma_hi,
-                    ext_node=vfx.glare_mask_ext_node, image_sock=orig_in)
+                    ext_node=vfx.glare_mask_ext_node, image_sock=orig_in,
+                    crypto_on=getattr(vfx, "crypto_on_glare", False),
+                    crypto_amount=getattr(vfx, "crypto_amount", 0.0),
+                    crypto_y=_PY - 100)
                 current = _apply_mask(nt, "GLARE", orig_in, glowed, msock, _PY - 150)
                 if msock is not None and getattr(vfx, "use_mask", False) and getattr(vfx, "mask_source", 'NONE') == 'GLARE':
                     view_sock = msock
@@ -1654,7 +1888,10 @@ def build_comp_assembly(vfx, master, nt=None):
                     vfx.grade_mask_invert, vfx.grade_mask_soft,
                     vfx.grade_mask_depth_start, vfx.grade_mask_depth_end,
                     vfx.grade_mask_luma_lo, vfx.grade_mask_luma_hi,
-                    ext_node=vfx.grade_mask_ext_node, image_sock=orig_in)
+                    ext_node=vfx.grade_mask_ext_node, image_sock=orig_in,
+                    crypto_on=getattr(vfx, "crypto_on_grade", False),
+                    crypto_amount=getattr(vfx, "crypto_amount", 0.0),
+                    crypto_y=_PY - 400)
                 current = _apply_mask(nt, "GRADE", orig_in, graded, msock, _PY - 250)
                 if msock is not None and getattr(vfx, "use_mask", False) and getattr(vfx, "mask_source", 'NONE') == 'GRADE':
                     view_sock = msock
@@ -1708,10 +1945,26 @@ def build_comp_assembly(vfx, master, nt=None):
                     for l in list(img_in.links):
                         nt.links.remove(l)
                     nt.links.new(current, img_in)
+                cm_out = None
                 for s in cm_node.outputs:
                     if s.type == 'RGBA':
-                        current = s
+                        cm_out = s
                         break
+                # Crypto influence on the color match
+                cm_act = (bool(getattr(vfx, "crypto_on_colormatch", False))
+                          and abs(float(getattr(vfx, "crypto_amount", 0.0) or 0.0)) > 0.001)
+                if cm_out is not None and cm_act:
+                    names = [n.strip() for n in (getattr(vfx, "crypto_pick_name", "") or "").split("|")
+                             if n.strip()]
+                    cnode = _ensure_crypto_influence(vfx, master, nt, names)
+                    if cnode is not None and cnode.outputs:
+                        msock = cnode.outputs[0]
+                        masked = _apply_mask(nt, "COLORMATCH", current, cm_out, msock,
+                                             _PY - 300)
+                        if masked is not None:
+                            current = masked
+                elif cm_out is not None:
+                    current = cm_out
         except Exception as e:
             print("VFX color match error:", e)
 

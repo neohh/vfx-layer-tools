@@ -462,13 +462,18 @@ class VFX_OT_pick_cryptomatte(bpy.types.Operator):
     target: EnumProperty(
         name="Target",
         items=(('NONE', "Global", "Store in scene VFX crypto_pick_name"),
-               ('LAYER', "Active Layer", "Store in the active layer's grade Ext Node")),
+               ('LAYER', "Active Layer", "Store in the active layer's grade Ext Node"),
+               ('INFLUENCE', "Crypto Influence",
+                "Add objects to the crypto influence set (click several)")),
         default='NONE')
 
     def invoke(self, context, event):
         if context.area and context.area.type != 'VIEW_3D':
             self.report({'ERROR'}, "Run from the 3D Viewport")
             return {'CANCELLED'}
+        if self.target == 'INFLUENCE':
+            vfx, master = get_project(context)
+            vfx.crypto_pick_name = ""
         context.window_manager.modal_handler_add(self)
         context.workspace.status_text_set(
             "VFX pipette: LMB pick object | ESC/RMB cancel")
@@ -478,16 +483,33 @@ class VFX_OT_pick_cryptomatte(bpy.types.Operator):
         context.area.tag_redraw()
         if event.type in {'ESC', 'RIGHTMOUSE'}:
             context.workspace.status_text_set(None)
-            return {'CANCELLED'}
+            if self.target == 'INFLUENCE':
+                try:
+                    vfx = context.scene.vfx
+                    n = len([x for x in (vfx.crypto_pick_name or "").split("|") if x.strip()])
+                    self.report({'INFO'}, f"Crypto influence set: {n} object(s)")
+                except Exception:
+                    pass
+            return {'FINISHED'}
         if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
             obj = self._pick(context, event)
-            context.workspace.status_text_set(None)
             if obj is None:
                 self.report({'WARNING'}, "Nothing under the cursor")
-                return {'CANCELLED'}
+                return {'RUNNING_MODAL'}
             self._apply(context, obj.name)
-            self.report({'INFO'}, f"Mask object: {obj.name}")
-            return {'FINISHED'}
+            if self.target != 'INFLUENCE':
+                context.workspace.status_text_set(None)
+                self.report({'INFO'}, f"Mask object: {obj.name}")
+                return {'FINISHED'}
+            # INFLUENCE mode: keep picking, accumulate names
+            try:
+                vfx = context.scene.vfx
+                n = len([x for x in (vfx.crypto_pick_name or "").split("|") if x.strip()])
+                context.workspace.status_text_set(
+                    f"VFX pipette: {n} picked — keep clicking, ESC to finish")
+            except Exception:
+                pass
+            return {'RUNNING_MODAL'}
         if event.type == 'MOUSEMOVE':
             return {'RUNNING_MODAL'}
         return {'PASS_THROUGH'}
@@ -532,6 +554,13 @@ class VFX_OT_pick_cryptomatte(bpy.types.Operator):
 
     def _apply(self, context, name):
         vfx, master = get_project(context, allow_write=True)
+        if self.target == 'INFLUENCE':
+            # accumulate picked objects into the shared crypto influence set
+            cur = [x.strip() for x in (vfx.crypto_pick_name or "").split("|") if x.strip()]
+            if name not in cur:
+                cur.append(name)
+            vfx.crypto_pick_name = "|".join(cur)
+            return
         vfx.crypto_pick_name = name
         if self.target == 'LAYER':
             layer = active_layer(vfx)
