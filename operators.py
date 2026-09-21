@@ -464,8 +464,19 @@ class VFX_OT_pick_cryptomatte(bpy.types.Operator):
         items=(('NONE', "Global", "Store in scene VFX crypto_pick_name"),
                ('LAYER', "Active Layer", "Store in the active layer's grade Ext Node"),
                ('INFLUENCE', "Crypto Influence",
-                "Add objects to the crypto influence set (click several)")),
+                "Add objects to one effect's crypto influence set (click several)")),
         default='NONE')
+    # which effect's object set to fill in INFLUENCE mode:
+    # FOG / DOF / GLARE / GRADE / CM
+    fx_key: StringProperty(default="")
+
+    _FX_PROPS = {
+        'FOG': 'fog_crypto_objects',
+        'DOF': 'dof_crypto_objects',
+        'GLARE': 'glare_crypto_objects',
+        'GRADE': 'grade_crypto_objects',
+        'CM': 'cm_crypto_objects',
+    }
 
     def invoke(self, context, event):
         if context.area and context.area.type != 'VIEW_3D':
@@ -473,7 +484,9 @@ class VFX_OT_pick_cryptomatte(bpy.types.Operator):
             return {'CANCELLED'}
         if self.target == 'INFLUENCE':
             vfx, master = get_project(context)
-            vfx.crypto_pick_name = ""
+            prop = self._FX_PROPS.get(self.fx_key)
+            if prop:
+                setattr(vfx, prop, "")  # start a fresh set for this effect
         context.window_manager.modal_handler_add(self)
         context.workspace.status_text_set(
             "VFX pipette: LMB pick object | ESC/RMB cancel")
@@ -486,8 +499,10 @@ class VFX_OT_pick_cryptomatte(bpy.types.Operator):
             if self.target == 'INFLUENCE':
                 try:
                     vfx = context.scene.vfx
-                    n = len([x for x in (vfx.crypto_pick_name or "").split("|") if x.strip()])
-                    self.report({'INFO'}, f"Crypto influence set: {n} object(s)")
+                    prop = self._FX_PROPS.get(self.fx_key, "")
+                    raw = getattr(vfx, prop, "") if prop else ""
+                    n = len([x for x in (raw or "").split("|") if x.strip()])
+                    self.report({'INFO'}, f"Crypto set ({self.fx_key}): {n} object(s)")
                 except Exception:
                     pass
             return {'FINISHED'}
@@ -504,9 +519,11 @@ class VFX_OT_pick_cryptomatte(bpy.types.Operator):
             # INFLUENCE mode: keep picking, accumulate names
             try:
                 vfx = context.scene.vfx
-                n = len([x for x in (vfx.crypto_pick_name or "").split("|") if x.strip()])
+                prop = self._FX_PROPS.get(self.fx_key, "")
+                raw = getattr(vfx, prop, "") if prop else ""
+                n = len([x for x in (raw or "").split("|") if x.strip()])
                 context.workspace.status_text_set(
-                    f"VFX pipette: {n} picked — keep clicking, ESC to finish")
+                    f"VFX {self.fx_key}: {n} picked — keep clicking, ESC to finish")
             except Exception:
                 pass
             return {'RUNNING_MODAL'}
@@ -555,11 +572,14 @@ class VFX_OT_pick_cryptomatte(bpy.types.Operator):
     def _apply(self, context, name):
         vfx, master = get_project(context, allow_write=True)
         if self.target == 'INFLUENCE':
-            # accumulate picked objects into the shared crypto influence set
-            cur = [x.strip() for x in (vfx.crypto_pick_name or "").split("|") if x.strip()]
+            # accumulate into ONE effect's own object set
+            prop = self._FX_PROPS.get(self.fx_key)
+            if not prop:
+                return
+            cur = [x.strip() for x in (getattr(vfx, prop, "") or "").split("|") if x.strip()]
             if name not in cur:
                 cur.append(name)
-            vfx.crypto_pick_name = "|".join(cur)
+            setattr(vfx, prop, "|".join(cur))
             return
         vfx.crypto_pick_name = name
         if self.target == 'LAYER':

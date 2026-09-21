@@ -552,7 +552,8 @@ def _set_maprange(mr, lo, hi):
 def build_mask(nt, props, name_prefix, source, invert, soft,
                depth_start, depth_end, luma_lo, luma_hi,
                ext_node="", image_sock=None, depth_sock=None,
-               crypto_on=False, crypto_amount=1.0, crypto_y=0.0):
+               crypto_on=False, crypto_amount=1.0, crypto_y=0.0,
+               crypto_pick="", crypto_node=""):
     """Build (or reuse) a mask chain and return a float socket 0..1.
 
     All nodes are named MASK_<name_prefix>* and reused on rebuild.
@@ -647,9 +648,9 @@ def build_mask(nt, props, name_prefix, source, invert, soft,
         crypto_amount = 0.0
     if crypto_on and sock is not None and abs(crypto_amount) > 0.001:
         master = getattr(props, 'master_scene', None) or bpy.context.scene
-        names = [n.strip() for n in (getattr(props, 'crypto_pick_name', '') or '').split('|')
-                 if n.strip()]
-        cnode = _ensure_crypto_influence(vfx=props, master=master, nt=nt, obj_names=names)
+        names = [n.strip() for n in (crypto_pick or '').split('|') if n.strip()]
+        cnode = _ensure_crypto_influence(
+            vfx=props, master=master, nt=nt, obj_names=names, node_name=crypto_node)
         if cnode is not None:
             csock = None
             for s in cnode.outputs:
@@ -968,11 +969,19 @@ def _set_socket(node, name, value):
 
 
 # ---------------------------------------------------------------------
-# CRYPTO INFLUENCE — shared cryptomatte mask of picked objects,
-# used to modulate any effect (fog / DOF / glare / grade / color match)
+# CRYPTO INFLUENCE — per-effect cryptomatte masks of picked objects,
+# used to modulate each effect independently (fog / DOF / glare / grade /
+# color match each have their OWN picked set and amount).
 # ---------------------------------------------------------------------
 
-CRYPTO_INFL_NODE = "VFX_CRYPTO_INFL"
+# effect key -> cryptomatte node name in the comp tree
+CRYPTO_INFL_NODES = {
+    'FOG': "VFX_CRYPTO_FOG",
+    'DOF': "VFX_CRYPTO_DOF",
+    'GLARE': "VFX_CRYPTO_GLARE",
+    'GRADE': "VFX_CRYPTO_GRADE",
+    'CM': "VFX_CRYPTO_CM",
+}
 
 
 def _ensure_fogmap_crypto_pass(vfx):
@@ -986,26 +995,22 @@ def _ensure_fogmap_crypto_pass(vfx):
                 pass
 
 
-def _ensure_crypto_influence(vfx, master, nt, obj_names):
-    """Create/update VFX_CRYPTO_INFL — a Cryptomatte node fed by the live
-    FOGMAP render layer, with all picked object names added as matte IDs.
-    Output is 1 inside the picked objects, 0 elsewhere.
-
-    Named 'VFX_CRYPTO_INFL' so it is NOT purged by build_comp_assembly
-    (which removes every other CRYPTOMATTE node) and it is clearly distinct
-    from the legacy single-object VFX_CRYPTO_PICK node.
-    """
-    if not obj_names:
+def _ensure_crypto_influence(vfx, master, nt, obj_names, node_name):
+    """Create/update a per-effect Cryptomatte node (e.g. VFX_CRYPTO_FOG)
+    fed by the live FOGMAP render layer, with the effect's picked object
+    names as matte IDs. Output is 1 inside those objects, 0 elsewhere.
+    Returns the node or None."""
+    if not obj_names or not node_name:
         return None
     _ensure_fogmap_crypto_pass(vfx)
-    node = nt.nodes.get(CRYPTO_INFL_NODE)
+    node = nt.nodes.get(node_name)
     if node is None:
         try:
             node = nt.nodes.new("CompositorNodeCryptomatte")
         except Exception:
             return None
-        node.name = CRYPTO_INFL_NODE
-        node.label = "CRYPTO INFLUENCE (picked)"
+        node.name = node_name
+        node.label = "CRYPTO " + node_name.split("VFX_CRYPTO_")[-1]
         node.location = (-350, -700)
     fm_node = nt.nodes.get("VFX_RL_FOGMAP")
     if fm_node is not None and node.inputs:
@@ -1431,7 +1436,7 @@ def build_comp_assembly(vfx, master, nt=None):
         print(f"[VFX fog] depth ramp: clear up to {ramp_black:.1f} m, "
               f"full fog at {ramp_white:.1f} m")
     for node in list(nt.nodes):
-        if node.type == 'CRYPTOMATTE' and node.name not in ("VFX_CRYPTO_PICK", CRYPTO_INFL_NODE):
+        if node.type == 'CRYPTOMATTE' and node.name not in ("VFX_CRYPTO_PICK",) and node.name not in CRYPTO_INFL_NODES.values():
             nt.nodes.remove(node)
     # ── COMPUTED STACKING ORDER (back -> front) ──
     # AUTO: by camera distance (nearest layer on top) | MANUAL: list order.
@@ -1612,17 +1617,18 @@ def build_comp_assembly(vfx, master, nt=None):
             if dens is not None:
                 dens.default_value = float(getattr(vfx, "fog_density", 1.0))
 
-            # Crypto influence: brighten/darken fog over picked objects
+            # Crypto influence: brighten/darken fog over the FOG effect's
+            # own picked objects (independent of every other effect)
             cmask_in = gi("Crypto Mask")
             if cmask_in is not None:
-                cact = (bool(getattr(vfx, "crypto_on_fog", False))
-                        and abs(float(getattr(vfx, "crypto_amount", 0.0) or 0.0)) > 0.001)
-                if cact:
+                fog_amt = float(getattr(vfx, "fog_crypto_amount", 0.0) or 0.0)
+                if bool(getattr(vfx, "crypto_on_fog", False)) and abs(fog_amt) > 0.001:
                     for l in list(cmask_in.links):
                         nt.links.remove(l)
-                    names = [n.strip() for n in (getattr(vfx, "crypto_pick_name", "") or "").split("|")
+                    names = [n.strip() for n in (getattr(vfx, "fog_crypto_objects", "") or "").split("|")
                              if n.strip()]
-                    cnode = _ensure_crypto_influence(vfx, master, nt, names)
+                    cnode = _ensure_crypto_influence(
+                        vfx, master, nt, names, CRYPTO_INFL_NODES['FOG'])
                     if cnode is not None and cnode.outputs:
                         try:
                             nt.links.new(cnode.outputs[0], cmask_in)
@@ -1633,7 +1639,7 @@ def build_comp_assembly(vfx, master, nt=None):
                         nt.links.remove(l)
                 cin_sock = gi("Crypto")
                 if cin_sock is not None:
-                    cin_sock.default_value = float(getattr(vfx, "crypto_amount", 0.0) or 0.0)
+                    cin_sock.default_value = fog_amt
 
             scol = gi("Fog Color")
             if scol is not None:
@@ -1756,7 +1762,9 @@ def build_comp_assembly(vfx, master, nt=None):
                             ext_node=vfx.dof_mask_ext_node, image_sock=orig_in,
                             depth_sock=depth_b,
                             crypto_on=getattr(vfx, "crypto_on_dof", False),
-                            crypto_amount=getattr(vfx, "crypto_amount", 0.0),
+                            crypto_amount=getattr(vfx, "dof_crypto_amount", 0.0),
+                            crypto_pick=getattr(vfx, "dof_crypto_objects", ""),
+                            crypto_node=CRYPTO_INFL_NODES['DOF'],
                             crypto_y=_PY + 150)
                         current = _apply_mask(nt, "DOF", orig_in, blurred, msock, _PY)
                         if msock is not None and getattr(vfx, "use_mask", False) and getattr(vfx, "mask_source", 'NONE') == 'DOF':
@@ -1801,7 +1809,9 @@ def build_comp_assembly(vfx, master, nt=None):
                     vfx.glare_mask_luma_lo, vfx.glare_mask_luma_hi,
                     ext_node=vfx.glare_mask_ext_node, image_sock=orig_in,
                     crypto_on=getattr(vfx, "crypto_on_glare", False),
-                    crypto_amount=getattr(vfx, "crypto_amount", 0.0),
+                    crypto_amount=getattr(vfx, "glare_crypto_amount", 0.0),
+                    crypto_pick=getattr(vfx, "glare_crypto_objects", ""),
+                    crypto_node=CRYPTO_INFL_NODES['GLARE'],
                     crypto_y=_PY - 100)
                 current = _apply_mask(nt, "GLARE", orig_in, glowed, msock, _PY - 150)
                 if msock is not None and getattr(vfx, "use_mask", False) and getattr(vfx, "mask_source", 'NONE') == 'GLARE':
@@ -1890,7 +1900,9 @@ def build_comp_assembly(vfx, master, nt=None):
                     vfx.grade_mask_luma_lo, vfx.grade_mask_luma_hi,
                     ext_node=vfx.grade_mask_ext_node, image_sock=orig_in,
                     crypto_on=getattr(vfx, "crypto_on_grade", False),
-                    crypto_amount=getattr(vfx, "crypto_amount", 0.0),
+                    crypto_amount=getattr(vfx, "grade_crypto_amount", 0.0),
+                    crypto_pick=getattr(vfx, "grade_crypto_objects", ""),
+                    crypto_node=CRYPTO_INFL_NODES['GRADE'],
                     crypto_y=_PY - 400)
                 current = _apply_mask(nt, "GRADE", orig_in, graded, msock, _PY - 250)
                 if msock is not None and getattr(vfx, "use_mask", False) and getattr(vfx, "mask_source", 'NONE') == 'GRADE':
@@ -1950,13 +1962,14 @@ def build_comp_assembly(vfx, master, nt=None):
                     if s.type == 'RGBA':
                         cm_out = s
                         break
-                # Crypto influence on the color match
+                # Crypto influence on the color match (its own picked set)
                 cm_act = (bool(getattr(vfx, "crypto_on_colormatch", False))
-                          and abs(float(getattr(vfx, "crypto_amount", 0.0) or 0.0)) > 0.001)
+                          and abs(float(getattr(vfx, "cm_crypto_amount", 0.0) or 0.0)) > 0.001)
                 if cm_out is not None and cm_act:
-                    names = [n.strip() for n in (getattr(vfx, "crypto_pick_name", "") or "").split("|")
+                    names = [n.strip() for n in (getattr(vfx, "cm_crypto_objects", "") or "").split("|")
                              if n.strip()]
-                    cnode = _ensure_crypto_influence(vfx, master, nt, names)
+                    cnode = _ensure_crypto_influence(
+                        vfx, master, nt, names, CRYPTO_INFL_NODES['CM'])
                     if cnode is not None and cnode.outputs:
                         msock = cnode.outputs[0]
                         masked = _apply_mask(nt, "COLORMATCH", current, cm_out, msock,

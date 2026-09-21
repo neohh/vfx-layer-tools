@@ -1,14 +1,14 @@
 bl_info = {
     "name": "VFX Layer Tools",
     "author": "VFX Pipeline",
-    "version": (3, 11, 0),
+    "version": (3, 11, 1),
     "blender": (5, 2, 1),
     "location": "View3D > Sidebar > VFX",
     "description": "VFX layer / scene / compositing manager",
     "category": "Compositing",
 }
 
-VFX_VERSION = "3.11.0"
+VFX_VERSION = "3.11.1"
 
 import bpy
 import importlib
@@ -396,23 +396,30 @@ class VFXProject(bpy.types.PropertyGroup):
         update=lambda s, c: _trigger_comp(c)
     )
     crypto_pick_name: StringProperty(
-        name="Picked Objects",
-        description="Objects picked with the Cryptomatte pipette (| separated)",
+        name="Picked Object",
+        description="Object picked with the Cryptomatte pipette",
         default=""
     )
-    crypto_amount: FloatProperty(
-        name="Influence Amount",
-        description="How much to change the effect on picked objects: "
-                    "+ = stronger (fog denser), − = weaker (fog clears). "
-                    "0 = off",
-        default=0.0, min=-1.0, max=1.0,
-        update=lambda s, c: _trigger_comp(c)
-    )
+
+    # --- Per-effect crypto influence: each effect has its OWN picked set
+    #     of objects and its own strength. Nothing is shared. ---
     crypto_on_fog: BoolProperty(
         name="Crypto Influence",
         description="Boost/reduce fog on picked objects",
         default=False,
         update=lambda s, c: _trigger_comp(c)
+    )
+    fog_crypto_amount: FloatProperty(
+        name="Fog Amount",
+        description="Fog strength change on picked objects: "
+                    "+ = denser fog, − = fog clears, 0 = no change",
+        default=0.0, min=-1.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    fog_crypto_objects: StringProperty(
+        name="Fog Objects",
+        description="Objects whose fog is boosted/reduced (| separated)",
+        default=""
     )
     crypto_on_dof: BoolProperty(
         name="Crypto Influence",
@@ -420,11 +427,35 @@ class VFXProject(bpy.types.PropertyGroup):
         default=False,
         update=lambda s, c: _trigger_comp(c)
     )
+    dof_crypto_amount: FloatProperty(
+        name="DOF Amount",
+        description="DOF blur change on picked objects: "
+                    "+ = more blur, − = less blur, 0 = no change",
+        default=0.0, min=-1.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    dof_crypto_objects: StringProperty(
+        name="DOF Objects",
+        description="Objects whose DOF blur is boosted/reduced (| separated)",
+        default=""
+    )
     crypto_on_glare: BoolProperty(
         name="Crypto Influence",
         description="Boost/reduce glare on picked objects",
         default=False,
         update=lambda s, c: _trigger_comp(c)
+    )
+    glare_crypto_amount: FloatProperty(
+        name="Glare Amount",
+        description="Glare change on picked objects: "
+                    "+ = brighter glow, − = dimmer, 0 = no change",
+        default=0.0, min=-1.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    glare_crypto_objects: StringProperty(
+        name="Glare Objects",
+        description="Objects whose glare is boosted/reduced (| separated)",
+        default=""
     )
     crypto_on_grade: BoolProperty(
         name="Crypto Influence",
@@ -432,11 +463,35 @@ class VFXProject(bpy.types.PropertyGroup):
         default=False,
         update=lambda s, c: _trigger_comp(c)
     )
+    grade_crypto_amount: FloatProperty(
+        name="Grade Amount",
+        description="Master grade change on picked objects: "
+                    "+ = stronger grade, − = weaker, 0 = no change",
+        default=0.0, min=-1.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    grade_crypto_objects: StringProperty(
+        name="Grade Objects",
+        description="Objects whose master grade is boosted/reduced (| separated)",
+        default=""
+    )
     crypto_on_colormatch: BoolProperty(
         name="Crypto Influence",
         description="Boost/reduce color match on picked objects",
         default=False,
         update=lambda s, c: _trigger_comp(c)
+    )
+    cm_crypto_amount: FloatProperty(
+        name="Color Match Amount",
+        description="Color match change on picked objects: "
+                    "+ = stronger, − = weaker, 0 = no change",
+        default=0.0, min=-1.0, max=1.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    cm_crypto_objects: StringProperty(
+        name="Color Match Objects",
+        description="Objects whose color match is boosted/reduced (| separated)",
+        default=""
     )
     use_color_match: BoolProperty(
         name="Color Match / Plate",

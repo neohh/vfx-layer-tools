@@ -236,20 +236,35 @@ def _draw_layer_list(context, layout):
                     r3.prop(layer, "grade_mask_soft")
 
 
+_CRYPTO_UI = {
+    # ui prop_name: (fx_key, amount_prop, objects_prop)
+    'crypto_on_fog': ('FOG', 'fog_crypto_amount', 'fog_crypto_objects'),
+    'crypto_on_dof': ('DOF', 'dof_crypto_amount', 'dof_crypto_objects'),
+    'crypto_on_glare': ('GLARE', 'glare_crypto_amount', 'glare_crypto_objects'),
+    'crypto_on_grade': ('GRADE', 'grade_crypto_amount', 'grade_crypto_objects'),
+    'crypto_on_colormatch': ('CM', 'cm_crypto_amount', 'cm_crypto_objects'),
+}
+
+
 def _draw_crypto_influence(context, layout, vfx, prop_name):
-    """Compact crypto-influence toggle + amount for one effect.
-    When on, also shows the shared picker row with the picked set."""
-    if not getattr(vfx, prop_name, False) and abs(float(getattr(vfx, "crypto_amount", 0.0) or 0.0)) <= 0.001:
+    """Compact per-effect crypto influence: own toggle, own amount and
+    its own picked object set (independent of every other effect)."""
+    fx_key, amt_prop, objs_prop = _CRYPTO_UI[prop_name]
+    active = bool(getattr(vfx, prop_name, False))
+    amt = float(getattr(vfx, amt_prop, 0.0) or 0.0)
+    if not active and abs(amt) <= 0.001:
         row = layout.row(align=True)
         row.prop(vfx, prop_name, text="", icon='EYEDROPPER', toggle=True)
         row.label(text="Crypto Influence", icon='BLANK1')
         return
     box = layout.box()
     box.prop(vfx, prop_name, icon='EYEDROPPER', toggle=True)
-    box.prop(vfx, "crypto_amount")
+    box.prop(vfx, amt_prop)
     pk = box.row(align=True)
-    pk.operator("vfx.pick_cryptomatte", text="Pick Objects", icon='EYEDROPPER').target = 'INFLUENCE'
-    names = [n for n in (getattr(vfx, "crypto_pick_name", "") or "").split("|") if n.strip()]
+    op = pk.operator("vfx.pick_cryptomatte", text="Pick Objects", icon='EYEDROPPER')
+    op.target = 'INFLUENCE'
+    op.fx_key = fx_key
+    names = [n for n in (getattr(vfx, objs_prop, "") or "").split("|") if n.strip()]
     if names:
         shown = ", ".join(names[:3]) + (f" +{len(names) - 3}" if len(names) > 3 else "")
         box.label(text=shown, icon='OBJECT_DATA')
