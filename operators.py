@@ -702,7 +702,9 @@ def _vfx_render_cancel(scene, *args):
 class VFX_OT_render_all_layers(bpy.types.Operator):
     bl_idname = "vfx.render_all_layers"
     bl_label = "Render All Layers"
+    bl_description = "Render all enabled layer scenes as EXR (objects + shadows + background)"
     post_files: BoolProperty(name="Then build comp from EXR", default=False)
+    include_layer_shadow: BoolProperty(name="Include active layer shadow pass", default=False)
     only_layer: IntProperty(name="Only layer index", default=-1)
     only_shadow_for_layer: IntProperty(name="Only shadow of layer index", default=-1)
     only_background: BoolProperty(name="Only background", default=False)
@@ -745,6 +747,8 @@ class VFX_OT_render_all_layers(bpy.types.Operator):
             layer = vfx.layers[only]
             if layer.scene:
                 scenes.append(layer.scene)
+            if self.include_layer_shadow and layer.shadow_scene:
+                scenes.append(layer.shadow_scene)
         else:
             for layer in vfx.layers:
                 if not layer.enabled:
@@ -910,6 +914,55 @@ class VFX_OT_one_click_exr(bpy.types.Operator):
     bl_description = "Render all layer scenes as EXR animation, then build comp from files"
     def execute(self, context):
         bpy.ops.vfx.render_all_layers('INVOKE_DEFAULT', post_files=True)
+        return {'FINISHED'}
+
+
+class VFX_OT_one_click_exr_single(bpy.types.Operator):
+    bl_idname = "vfx.one_click_exr_single"
+    bl_label = "Render Selected Layer EXR + Comp"
+    bl_description = (
+        "Render only the layer selected in the list as EXR animation, "
+        "then rebuild comp from files. Uses render settings below "
+        "(objects engine, shadows engine). Shadow pass of the layer "
+        "is rendered too, if it exists"
+    )
+    include_layer_shadow: BoolProperty(
+        name="Include shadow pass",
+        description="Also render the shadow pass of this layer",
+        default=True,
+    )
+
+    def invoke(self, context, event):
+        vfx, master = get_project(context)
+        layer = active_layer(vfx)
+        if not layer:
+            self.report({'ERROR'}, "No active layer (select a layer in the list)")
+            return {'CANCELLED'}
+        if not layer.scene:
+            self.report({'ERROR'}, f"Layer '{layer.layer_name}' has no scene")
+            return {'CANCELLED'}
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        vfx, master = get_project(context)
+        layer = active_layer(vfx)
+        if not layer or not layer.scene:
+            self.report({'ERROR'}, "No active layer with scene")
+            return {'CANCELLED'}
+        index = -1
+        for i, item in enumerate(vfx.layers):
+            if item.id == layer.id:
+                index = i
+                break
+        if index < 0:
+            self.report({'ERROR'}, "Layer not found")
+            return {'CANCELLED'}
+        bpy.ops.vfx.render_all_layers(
+            'INVOKE_DEFAULT',
+            post_files=True,
+            only_layer=index,
+            include_layer_shadow=self.include_layer_shadow,
+        )
         return {'FINISHED'}
 
 

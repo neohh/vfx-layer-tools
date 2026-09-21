@@ -424,6 +424,13 @@ def _draw_render_settings(context, layout):
         icon='FILE_IMAGE'
     )
 
+    row = layout.row(align=True)
+    row.operator(
+        "vfx.one_click_exr_single",
+        text="1-Click: Render Selected Layer EXR + Comp",
+        icon='IMAGE_ZDEPTH'
+    )
+
     if vfx.render_running:
         bar = layout.column(align=True)
         bar.scale_y = 2.5

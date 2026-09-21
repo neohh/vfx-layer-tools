@@ -1,14 +1,14 @@
 bl_info = {
     "name": "VFX Layer Tools",
     "author": "VFX Pipeline",
-    "version": (3, 9, 1),
+    "version": (3, 10, 0),
     "blender": (5, 2, 1),
     "location": "View3D > Sidebar > VFX",
     "description": "VFX layer / scene / compositing manager",
     "category": "Compositing",
 }
 
-VFX_VERSION = "3.9.1"
+VFX_VERSION = "3.10.0"
 
 import bpy
 import importlib
@@ -686,6 +686,7 @@ from .operators import (
     VFX_OT_drag_layer, VFX_OT_move_layer_up, VFX_OT_move_layer_down,
     VFX_OT_debug_layer, VFX_OT_rebuild_comp,
     VFX_OT_render_all_layers, VFX_OT_one_click_exr,
+    VFX_OT_one_click_exr_single,
     VFX_OT_create_background, VFX_OT_delete_background,
     VFX_OT_delete_shadow_pass, VFX_OT_refresh_proxies,
     VFX_OT_refresh_occlusion,
@@ -734,6 +735,7 @@ classes = (
     VFX_OT_rebuild_comp,
     VFX_OT_render_all_layers,
     VFX_OT_one_click_exr,
+    VFX_OT_one_click_exr_single,
     VFX_OT_create_background,
     VFX_OT_delete_background,
     VFX_OT_delete_shadow_pass,
