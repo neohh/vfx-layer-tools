@@ -155,7 +155,10 @@ def add_light_group_output_nodes(vfx, master, nt):
         base_y = rl_node.location.y - 200
         current_sock = None
         for i, lg_out in enumerate(lg_outputs):
-            add_node = nt.nodes.new("CompositorNodeMath")
+            try:
+                add_node = nt.nodes.new("ShaderNodeMath")
+            except Exception:
+                add_node = nt.nodes.new("CompositorNodeMath")
             add_node.name = f"VFX_LG_MIX_{layer.id}_{i}"
             add_node.label = f"LG Mix: {lg_out.name}"
             add_node["vfx_lightgroup"] = 1

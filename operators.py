@@ -3,6 +3,9 @@
 import bpy
 import math
 import time
+import os
+import subprocess
+import sys
 from bpy.props import (
     StringProperty, BoolProperty, IntProperty, FloatProperty, EnumProperty,
 )
@@ -17,7 +20,7 @@ from .core import (
 )
 from .shadow import (
     set_shadow_catcher, set_only_shadow_caster, refresh_shadow_proxies,
-    create_default_catcher,
+    create_default_catcher, setup_shadow_isolation_comp,
 )
 from .occlusion import (
     rebuild_all_occlusion, rebuild_layer_occlusion, remove_occlusion_collection,
@@ -27,6 +30,7 @@ from .compositor import (
     get_comp_tree, rebuild_comp, rebuild_comp_from_files,
     build_comp_assembly, ensure_render_node, remove_comp_node,
     _setup_fog_passes, _ensure_fogmap, _get_mist_socket,
+    _ensure_fogmap_scene_comp,
 )
 from .materials import _trigger_rebuild, _trigger_comp, update_layer_material_adjust
 from .lightgroups import auto_assign_light_groups, enable_light_groups_on_view_layer
@@ -188,6 +192,49 @@ class VFX_OT_remove_selected_from_layer(bpy.types.Operator):
             except Exception as e:
                 print("VFX occlusion error:", e)
         self.report({'INFO'}, f"Removed {count} object(s) from {layer.layer_name}")
+        return {'FINISHED'}
+
+
+class VFX_OT_select_layer_objects(bpy.types.Operator):
+    bl_idname = "vfx.select_layer_objects"
+    bl_label = "Select Layer Objects in 3D Viewport"
+    bl_description = "Select all objects that belong to this layer in the 3D viewport"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    layer_index: IntProperty(name="Layer Index", default=-1)
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=False)
+        idx = self.layer_index
+        if idx >= 0 and idx < len(vfx.layers):
+            layer = vfx.layers[idx]
+        else:
+            layer = active_layer(vfx)
+
+        if not layer or not layer.collection:
+            self.report({'WARNING'}, "Layer has no collection")
+            return {'CANCELLED'}
+
+        # Deselect all currently selected objects in active view layer
+        bpy.ops.object.select_all(action='DESELECT')
+
+        count = 0
+        active_candidate = None
+        for obj in layer.collection.objects:
+            # Skip holdout proxies or empties if desired, but user wants to see layer contents
+            if obj.get("vfx_proxy"):
+                continue
+            try:
+                obj.select_set(True)
+                active_candidate = obj
+                count += 1
+            except Exception:
+                pass
+
+        if active_candidate:
+            context.view_layer.objects.active = active_candidate
+
+        self.report({'INFO'}, f"Selected {count} object(s) from layer '{layer.layer_name}'")
         return {'FINISHED'}
 
 
@@ -644,6 +691,7 @@ class VFX_OT_drag_layer(bpy.types.Operator):
         return {'RUNNING_MODAL'}
     def finish(self, context):
         vfx, master = get_project(context, allow_write=True)
+        vfx.composite_sort_mode = 'MANUAL'
         rebuild_comp(vfx, master)  # order follows list order in MANUAL mode
 
 
@@ -658,6 +706,7 @@ class VFX_OT_move_layer_up(bpy.types.Operator):
             return {'CANCELLED'}
         vfx.layers.move(i, i - 1)
         vfx.active_layer_index = i - 1
+        vfx.composite_sort_mode = 'MANUAL'
         rebuild_comp(vfx, master)
         return {'FINISHED'}
 
@@ -673,6 +722,7 @@ class VFX_OT_move_layer_down(bpy.types.Operator):
             return {'CANCELLED'}
         vfx.layers.move(i, i + 1)
         vfx.active_layer_index = i + 1
+        vfx.composite_sort_mode = 'MANUAL'
         rebuild_comp(vfx, master)
         return {'FINISHED'}
 
@@ -748,6 +798,26 @@ def _vfx_render_cancel(scene, *args):
         op.job_done = True
 
 
+def get_existing_frame_numbers(folder, ext=None):
+    if not os.path.exists(folder):
+        return set()
+    nums = set()
+    try:
+        for f in os.listdir(folder):
+            base, fext = os.path.splitext(f)
+            if ext and fext.lower() != ext.lower():
+                continue
+            if not ext and fext.lower() not in ('.exr', '.png', '.tif', '.tiff'):
+                continue
+            try:
+                nums.add(int(base))
+            except ValueError:
+                pass
+    except Exception:
+        pass
+    return nums
+
+
 class VFX_OT_render_all_layers(bpy.types.Operator):
     bl_idname = "vfx.render_all_layers"
     bl_label = "Render All Layers"
@@ -757,6 +827,8 @@ class VFX_OT_render_all_layers(bpy.types.Operator):
     only_layer: IntProperty(name="Only layer index", default=-1)
     only_shadow_for_layer: IntProperty(name="Only shadow of layer index", default=-1)
     only_background: BoolProperty(name="Only background", default=False)
+    only_fog_map: BoolProperty(name="Only fog map scene", default=False)
+    only_selected: BoolProperty(name="Only selected layers", default=False)
     refresh_after: BoolProperty(name="Refresh EXR comp after", default=False)
     def execute(self, context):
         vfx, master = get_project(context, allow_write=True)
@@ -764,6 +836,8 @@ class VFX_OT_render_all_layers(bpy.types.Operator):
         only = getattr(self, "only_layer", -1)
         only_shd = getattr(self, "only_shadow_for_layer", -1)
         only_bg = getattr(self, "only_background", False)
+        only_fog = getattr(self, "only_fog_map", False)
+        only_sel = getattr(self, "only_selected", False)
         if vfx.render_running:
             job_alive = False
             try:
@@ -786,7 +860,12 @@ class VFX_OT_render_all_layers(bpy.types.Operator):
             except Exception:
                 pass
         scenes = []
-        if only_bg and getattr(vfx, "bg_scene", None) is not None:
+        if only_fog:
+            _setup_fog_passes(vfx, master, force=True)
+            fm = getattr(vfx, "fog_map_scene", None)
+            if fm is not None:
+                scenes.append(fm)
+        elif only_bg and getattr(vfx, "bg_scene", None) is not None:
             scenes.append(vfx.bg_scene)
         elif only_shd >= 0 and only_shd < len(vfx.layers):
             layer = vfx.layers[only_shd]
@@ -798,6 +877,17 @@ class VFX_OT_render_all_layers(bpy.types.Operator):
                 scenes.append(layer.scene)
             if self.include_layer_shadow and layer.shadow_scene:
                 scenes.append(layer.shadow_scene)
+        elif only_sel:
+            sel_layers = [l for l in vfx.layers if getattr(l, "selected", False)]
+            if not sel_layers:
+                act = active_layer(vfx)
+                if act:
+                    sel_layers = [act]
+            for layer in sel_layers:
+                if layer.scene:
+                    scenes.append(layer.scene)
+                if self.include_layer_shadow and layer.shadow_scene:
+                    scenes.append(layer.shadow_scene)
         else:
             for layer in vfx.layers:
                 if not layer.enabled:
@@ -809,30 +899,93 @@ class VFX_OT_render_all_layers(bpy.types.Operator):
             bg = getattr(vfx, "bg_scene", None)
             if bg is not None:
                 scenes.insert(0, bg)
+            if getattr(vfx, "use_fog", False) or getattr(vfx, "use_dof", False):
+                _setup_fog_passes(vfx, master, force=True)
+                fm = getattr(vfx, "fog_map_scene", None)
+                if fm is not None and fm not in scenes:
+                    scenes.append(fm)
         if not scenes:
             self.report({'ERROR'}, "No enabled layer scenes")
             return {'CANCELLED'}
         self.mode = 'ANIMATION'
-        try:
-            refresh_shadow_proxies(vfx, master)
-        except Exception as e:
-            print("VFX proxy refresh error:", e)
+        # Shadow proxies are NOT auto-refreshed before render to preserve
+        # manual visibility edits. Use "Refresh Shadow Proxies" button instead.
+        # try:
+        #     refresh_shadow_proxies(vfx, master)
+        # except Exception as e:
+        #     print("VFX proxy refresh error:", e)
         try:
             rebuild_all_occlusion(vfx, master)  # holdouts fresh for every render
         except Exception as e:
             print("VFX occlusion refresh error:", e)
         self.steps = []
         total_frames = 0
+        already_done_frames = 0
+        resume = getattr(vfx, "resume_render", True)
+
         for sc in scenes:
+            is_fog_sc = (sc.name == "VFX_FOGMAP" or sc == getattr(vfx, "fog_map_scene", None))
+            sc_fmt = getattr(vfx, "fog_map_format", 'PNG') if is_fog_sc else getattr(vfx, "render_format", 'OPEN_EXR')
+            sc_target_ext = '.png' if sc_fmt == 'PNG' else '.exr'
+
+            # Determine if this scene is static (single frame hold)
+            is_static_scene = False
+            target_static_frame = 1
+            if getattr(vfx, "bg_scene", None) and sc == vfx.bg_scene:
+                if getattr(vfx, "bg_is_static", True):
+                    is_static_scene = True
+                    target_static_frame = getattr(vfx, "bg_static_frame", 1)
+            elif is_fog_sc:
+                # Fog map is animated along with camera and objects
+                is_static_scene = False
+            else:
+                for layer in vfx.layers:
+                    if layer.scene and sc == layer.scene:
+                        if getattr(layer, "is_static", False):
+                            is_static_scene = True
+                            target_static_frame = getattr(layer, "static_frame", 1)
+                        break
+                    elif layer.shadow_scene and sc == layer.shadow_scene:
+                        # Shadow pass is dynamic (tracks animated casters onto static catcher)
+                        is_static_scene = False
+                        break
+
+            out_dir = bpy.path.abspath(f"{vfx.output_dir}{sc.name}/")
+            existing = get_existing_frame_numbers(out_dir, sc_target_ext)
+
+            if is_static_scene:
+                if resume and target_static_frame in existing:
+                    already_done_frames += 1
+                    continue
+                sc.frame_start = target_static_frame
+                sc.frame_end = target_static_frame
+            else:
+                p_start = master.frame_start
+                p_end = master.frame_end
+                if resume and existing:
+                    cur = p_start
+                    while cur <= p_end and cur in existing:
+                        cur += 1
+                    if cur > p_end:
+                        # Entire layer already finished!
+                        already_done_frames += (p_end - p_start + 1)
+                        continue
+                    sc.frame_start = cur
+                    sc.frame_end = p_end
+                    already_done_frames += (cur - p_start)
+                else:
+                    sc.frame_start = p_start
+                    sc.frame_end = p_end
+
             try:
-                sc.frame_start = master.frame_start
-                sc.frame_end = master.frame_end
-            except Exception:
-                pass
-            try:
-                sc.render.image_settings.file_format = 'OPEN_EXR'
-                sc.render.image_settings.color_mode = 'RGBA'
-                sc.render.image_settings.color_depth = '32'
+                if sc_fmt == 'PNG':
+                    sc.render.image_settings.file_format = 'PNG'
+                    sc.render.image_settings.color_mode = 'RGBA'
+                    sc.render.image_settings.color_depth = '16'
+                else:
+                    sc.render.image_settings.file_format = 'OPEN_EXR'
+                    sc.render.image_settings.color_mode = 'RGBA'
+                    sc.render.image_settings.color_depth = '32'
                 sc.render.filepath = f"{vfx.output_dir}{sc.name}/"
             except Exception:
                 pass
@@ -845,16 +998,33 @@ class VFX_OT_render_all_layers(bpy.types.Operator):
             n = (sc.frame_end - sc.frame_start + 1)
             total_frames += n
             self.steps.append((sc.name, n))
-        self.total_frames = max(1, total_frames)
+
+        if not self.steps:
+            self.report({'INFO'}, "Все выбранные слои уже полностью отрендерены!")
+            if getattr(self, "post_files", False) or getattr(self, "refresh_after", False):
+                try:
+                    m_sc = vfx.master_scene or context.scene
+                    vfx.comp_mode = 'FILES'
+                    rebuild_comp_from_files(vfx, m_sc)
+                except Exception as e:
+                    print("VFX rebuild comp error:", e)
+            vfx.render_running = False
+            vfx.render_progress = 1.0
+            vfx.render_status = "Done (all frames already exist)"
+            return {'FINISHED'}
+
+        self.total_frames = max(1, total_frames + already_done_frames)
         self.step_index = 0
-        self.frames_done = 0
+        self.frames_done = already_done_frames
         self.user_cancel = False
         self.cancelled = False
         self.job_done = False
         vfx.render_running = True
-        vfx.render_progress = 0.0
+        vfx.render_progress = min(1.0, self.frames_done / self.total_frames)
         vfx.render_status = "Starting..."
         _RENDER_STATE["op"] = self
+        self.parallel_procs = []
+        self.is_parallel_step = False
         bpy.app.handlers.render_post.append(_vfx_render_post)
         bpy.app.handlers.render_complete.append(_vfx_render_complete)
         bpy.app.handlers.render_cancel.append(_vfx_render_cancel)
@@ -873,8 +1043,89 @@ class VFX_OT_render_all_layers(bpy.types.Operator):
             sc.render.use_persistent_data = True
         except Exception:
             pass
+
+        # Ensure correct compositor node group for this scene:
+        # Shadow scenes MUST use their shadow isolation comp, NEVER VFX_Compositor!
+        # Regular layer scenes should NOT use any compositor node group.
+        is_shadow_sc = False
+        master_sc = getattr(vfx, "master_scene", None) or context.scene
+        for l in vfx.layers:
+            if l.shadow_scene and l.shadow_scene == sc:
+                is_shadow_sc = True
+                try:
+                    tree = setup_shadow_isolation_comp(l, master_sc)
+                    if tree and hasattr(sc, "compositing_node_group"):
+                        sc.compositing_node_group = tree
+                except Exception as e:
+                    print(f"VFX: error attaching shadow isolation comp for {sc.name}:", e)
+                break
+
+        if not is_shadow_sc and sc != master_sc:
+            if sc.name == "VFX_FOGMAP" or sc == getattr(vfx, "fog_map_scene", None):
+                _ensure_fogmap_scene_comp(sc)
+            elif hasattr(sc, "compositing_node_group") and sc.compositing_node_group:
+                # Regular layer scenes render raw geometry without compositing
+                sc.compositing_node_group = None
         self.job_done = False
         self.step_start = time.time()
+        self.is_parallel_step = False
+
+        # Parallel background render for animations (RTX 5080 multi-instance)
+        if getattr(vfx, "use_parallel_render", False) and n > 1:
+            k = min(max(2, getattr(vfx, "parallel_instances", 2)), n)
+            if bpy.data.is_dirty or not bpy.data.filepath:
+                try:
+                    bpy.ops.wm.save_as_mainfile(filepath=bpy.data.filepath, check_existing=False)
+                except Exception:
+                    pass
+            out_dir = bpy.path.abspath(f"{vfx.output_dir}{sc.name}/")
+            os.makedirs(out_dir, exist_ok=True)
+            is_fog_sc = (sc.name == "VFX_FOGMAP" or sc == getattr(vfx, "fog_map_scene", None))
+            fmt = getattr(vfx, "fog_map_format", 'PNG') if is_fog_sc else getattr(vfx, "render_format", 'OPEN_EXR')
+            target_ext = '.png' if fmt == 'PNG' else '.exr'
+            try:
+                self.initial_folder_files = len([f for f in os.listdir(out_dir) if f.lower().endswith(target_ext)])
+            except Exception:
+                self.initial_folder_files = 0
+
+            out_pattern = os.path.join(out_dir, "####")
+            chunk_size = math.ceil(n / k)
+            self.parallel_procs = []
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            for i in range(k):
+                c_start = sc.frame_start + i * chunk_size
+                c_end = min(sc.frame_end, c_start + chunk_size - 1)
+                if c_start > sc.frame_end:
+                    break
+                cmd = [
+                    bpy.app.binary_path, "-b", bpy.data.filepath,
+                    "--scene", name,
+                    "-F", "PNG" if fmt == 'PNG' else "OPEN_EXR",
+                    "-o", out_pattern,
+                    "-s", str(c_start),
+                    "-e", str(c_end),
+                    "-a"
+                ]
+                try:
+                    p = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        creationflags=flags
+                    )
+                    self.parallel_procs.append((p, c_start, c_end))
+                except Exception as e:
+                    print(f"VFX parallel worker error ({c_start}-{c_end}):", e)
+
+            if self.parallel_procs:
+                self.is_parallel_step = True
+                pct = int((self.frames_done / self.total_frames) * 100)
+                vfx.render_status = f"{pct}% ({self.frames_done}/{self.total_frames}) [{name}] x{len(self.parallel_procs)}"
+                for window in bpy.context.window_manager.windows:
+                    for area in window.screen.areas:
+                        area.tag_redraw()
+                return
+
         vfx.render_progress = min(1.0, self.frames_done / self.total_frames)
         vfx.render_status = f"{self.frames_done}/{self.total_frames}  {name}"
         for window in bpy.context.window_manager.windows:
@@ -899,6 +1150,54 @@ class VFX_OT_render_all_layers(bpy.types.Operator):
                 self.job_done = True
     def modal(self, context, event):
         vfx = context.scene.vfx
+
+        # --- Parallel render modal branch ---
+        if getattr(self, "is_parallel_step", False):
+            if event.type == 'ESC' and event.value == 'PRESS':
+                self.user_cancel = True
+                for p, _, _ in getattr(self, "parallel_procs", []):
+                    try:
+                        p.terminate()
+                    except Exception:
+                        pass
+                self.parallel_procs.clear()
+                self._finish(context)
+                return {'FINISHED'}
+
+            if event.type == 'TIMER':
+                name, n = self.steps[self.step_index]
+                out_dir = bpy.path.abspath(f"{vfx.output_dir}{name}/")
+                new_frames = 0
+                try:
+                    is_fog = (name == "VFX_FOGMAP" or (vfx.fog_map_scene and vfx.fog_map_scene.name == name))
+                    fmt = getattr(vfx, "fog_map_format", 'PNG') if is_fog else getattr(vfx, "render_format", 'OPEN_EXR')
+                    target_ext = '.png' if fmt == 'PNG' else '.exr'
+                    now_files = len([f for f in os.listdir(out_dir) if f.lower().endswith(target_ext)])
+                    new_frames = max(0, min(n, now_files - getattr(self, "initial_folder_files", 0)))
+                except Exception:
+                    pass
+
+                prog = min(1.0, (self.frames_done + new_frames) / self.total_frames)
+                vfx.render_progress = prog
+                pct = int(prog * 100)
+                vfx.render_status = f"{pct}% ({self.frames_done + new_frames}/{self.total_frames}) [{name}: {new_frames}/{n}] x{len(self.parallel_procs)}"
+                for window in bpy.context.window_manager.windows:
+                    for area in window.screen.areas:
+                        area.tag_redraw()
+
+                all_done = all(p.poll() is not None for p, _, _ in self.parallel_procs)
+                if all_done:
+                    self.parallel_procs.clear()
+                    self.is_parallel_step = False
+                    self.frames_done += n
+                    self.step_index += 1
+                    if self.user_cancel or self.cancelled or self.step_index >= len(self.steps):
+                        self._finish(context)
+                        return {'FINISHED'}
+                    self._start_step(context)
+            return {'PASS_THROUGH'}
+
+        # --- Standard sequential modal branch ---
         if event.type == 'ESC' and event.value == 'PRESS':
             self.user_cancel = True
             try:
@@ -909,6 +1208,11 @@ class VFX_OT_render_all_layers(bpy.types.Operator):
             prog = min(1.0, self.frames_done / self.total_frames)
             if abs(prog - vfx.render_progress) > 0.001:
                 vfx.render_progress = prog
+                if self.step_index < len(self.steps):
+                    vfx.render_status = (
+                        f"{self.frames_done}/{self.total_frames}  "
+                        f"{self.steps[self.step_index][0]}"
+                    )
                 for window in bpy.context.window_manager.windows:
                     for area in window.screen.areas:
                         area.tag_redraw()
@@ -928,6 +1232,13 @@ class VFX_OT_render_all_layers(bpy.types.Operator):
         return {'PASS_THROUGH'}
     def _finish(self, context):
         vfx = context.scene.vfx
+        for p, _, _ in getattr(self, "parallel_procs", []):
+            try:
+                p.terminate()
+            except Exception:
+                pass
+        self.parallel_procs = []
+        self.is_parallel_step = False
         stopped = self.user_cancel or self.cancelled
         _RENDER_STATE["op"] = None
         try:
@@ -944,17 +1255,48 @@ class VFX_OT_render_all_layers(bpy.types.Operator):
         if not stopped:
             vfx.render_progress = 1.0
         vfx.render_status = "Stopped (ESC)" if stopped else "Done"
-        if not stopped and (getattr(self, "post_files", False) or getattr(self, "refresh_after", False)):
+        # Rebuild comp whenever it was requested — also after ESC/stop,
+        # as long as at least one frame reached the disk (a partial
+        # sequence is valid input; comp reads whatever EXRs exist).
+        rendered_any = self.frames_done > 0
+        if (getattr(self, "post_files", False) or getattr(self, "refresh_after", False)) \
+                and (not stopped or rendered_any):
             try:
                 master = vfx.master_scene or context.scene
                 vfx.comp_mode = 'FILES'
                 rebuild_comp_from_files(vfx, master)
-                vfx.render_status = "Done + comp from EXR"
+                vfx.render_status = \
+                    "Stopped + comp from EXR (partial)" if stopped else "Done + comp from EXR"
             except Exception as e:
                 print("VFX post-files error:", e)
         for window in bpy.context.window_manager.windows:
             for area in window.screen.areas:
                 area.tag_redraw()
+
+
+class VFX_OT_stop_render(bpy.types.Operator):
+    bl_idname = "vfx.stop_render"
+    bl_label = "Остановить рендер"
+    bl_description = "Прервать текущий рендер и сохранить готовые кадры"
+
+    def execute(self, context):
+        op = _RENDER_STATE.get("op")
+        if op:
+            op.user_cancel = True
+            for p, _, _ in getattr(op, "parallel_procs", []):
+                try:
+                    p.terminate()
+                except Exception:
+                    pass
+            try:
+                bpy.ops.render.view_cancel()
+            except Exception:
+                pass
+            self.report({'INFO'}, "Рендер останавливается...")
+        else:
+            context.scene.vfx.render_running = False
+            _RENDER_STATE["op"] = None
+        return {'FINISHED'}
 
 
 class VFX_OT_one_click_exr(bpy.types.Operator):
@@ -966,52 +1308,74 @@ class VFX_OT_one_click_exr(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class VFX_OT_render_fog_map(bpy.types.Operator):
+    bl_idname = "vfx.render_fog_map"
+    bl_label = "Рендер секвенции Mist"
+    bl_description = "Быстро отрендерить последовательность кадров Mist (карты глубины) в EEVEE для тумана и размытия"
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=True)
+        _setup_fog_passes(vfx, master, force=True)
+        bpy.ops.vfx.render_all_layers('INVOKE_DEFAULT', only_fog_map=True, post_files=True)
+        return {'FINISHED'}
+
+
 class VFX_OT_one_click_exr_single(bpy.types.Operator):
     bl_idname = "vfx.one_click_exr_single"
-    bl_label = "Render Selected Layer EXR + Comp"
+    bl_label = "Render Selected Layer(s) EXR + Comp"
     bl_description = (
-        "Render only the layer selected in the list as EXR animation, "
+        "Render selected layers (or active layer if none selected) as EXR animation, "
         "then rebuild comp from files. Uses render settings below "
-        "(objects engine, shadows engine). Shadow pass of the layer "
-        "is rendered too, if it exists"
+        "(objects engine, shadows engine). Shadow passes of layers "
+        "are rendered too, if enabled"
     )
     include_layer_shadow: BoolProperty(
         name="Include shadow pass",
-        description="Also render the shadow pass of this layer",
+        description="Also render the shadow pass of selected layers",
         default=True,
     )
 
     def invoke(self, context, event):
         vfx, master = get_project(context)
-        layer = active_layer(vfx)
-        if not layer:
-            self.report({'ERROR'}, "No active layer (select a layer in the list)")
-            return {'CANCELLED'}
-        if not layer.scene:
-            self.report({'ERROR'}, f"Layer '{layer.layer_name}' has no scene")
-            return {'CANCELLED'}
+        sel_layers = [l for l in vfx.layers if getattr(l, "selected", False) and l.scene]
+        if not sel_layers:
+            layer = active_layer(vfx)
+            if not layer:
+                self.report({'ERROR'}, "No active or selected layer")
+                return {'CANCELLED'}
+            if not layer.scene:
+                self.report({'ERROR'}, f"Layer '{layer.layer_name}' has no scene")
+                return {'CANCELLED'}
         return context.window_manager.invoke_props_dialog(self)
 
     def execute(self, context):
         vfx, master = get_project(context)
-        layer = active_layer(vfx)
-        if not layer or not layer.scene:
-            self.report({'ERROR'}, "No active layer with scene")
-            return {'CANCELLED'}
-        index = -1
-        for i, item in enumerate(vfx.layers):
-            if item.id == layer.id:
-                index = i
-                break
-        if index < 0:
-            self.report({'ERROR'}, "Layer not found")
-            return {'CANCELLED'}
-        bpy.ops.vfx.render_all_layers(
-            'INVOKE_DEFAULT',
-            post_files=True,
-            only_layer=index,
-            include_layer_shadow=self.include_layer_shadow,
-        )
+        sel_layers = [l for l in vfx.layers if getattr(l, "selected", False) and l.scene]
+        if not sel_layers:
+            layer = active_layer(vfx)
+            if not layer or not layer.scene:
+                self.report({'ERROR'}, "No active or selected layer with scene")
+                return {'CANCELLED'}
+            index = -1
+            for i, item in enumerate(vfx.layers):
+                if item.id == layer.id:
+                    index = i
+                    break
+            if index < 0:
+                self.report({'ERROR'}, "Layer not found")
+                return {'CANCELLED'}
+            bpy.ops.vfx.render_all_layers(
+                'INVOKE_DEFAULT',
+                post_files=True,
+                only_layer=index,
+                include_layer_shadow=self.include_layer_shadow,
+            )
+        else:
+            bpy.ops.vfx.render_all_layers(
+                'INVOKE_DEFAULT',
+                post_files=True,
+                only_selected=True,
+                include_layer_shadow=self.include_layer_shadow,
+            )
         return {'FINISHED'}
 
 
@@ -1091,6 +1455,14 @@ class VFX_OT_delete_shadow_pass(bpy.types.Operator):
 
 
 def auto_sync_settings(vfx, master):
+    try:
+        root = ensure_root(master)
+        lcol = ensure_light_collection(master, root)
+        sync_master_lights(master, root)
+        link_lights_to_all_scenes(vfx, lcol)
+    except Exception as e:
+        print("VFX auto_sync_settings lights error:", e)
+
     for layer in vfx.layers:
         if layer.scene:
             try:
@@ -1291,4 +1663,310 @@ class VFX_OT_copy_master_grade(bpy.types.Operator):
             layer.l_contrast = vfx.m_contrast
         rebuild_comp(vfx, master)
         self.report({'INFO'}, f"Copied master grade to {len(vfx.layers)} layers")
+        return {'FINISHED'}
+
+
+class VFX_OT_toggle_viewport_compositor(bpy.types.Operator):
+    bl_idname = "vfx.toggle_viewport_compositor"
+    bl_label = "Toggle Viewport Compositor"
+    bl_description = "Toggle real-time viewport compositing (shows fog, grade, effects live in 3D viewport)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=True)
+        # Ensure compositor tree is built and fresh
+        rebuild_comp(vfx, master)
+
+        # Check current viewport shading in active space
+        found = False
+        target_mode = 'ALWAYS'
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                for space in area.spaces:
+                    if space.type == 'VIEW_3D':
+                        shading = getattr(space, "shading", None)
+                        if shading and hasattr(shading, "use_compositor"):
+                            current = shading.use_compositor
+                            target_mode = 'DISABLED' if current in ('ALWAYS', 'CAMERA') else 'ALWAYS'
+                            found = True
+                            break
+                if found:
+                    break
+
+        # Apply to all 3D viewports
+        count = 0
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                for space in area.spaces:
+                    if space.type == 'VIEW_3D':
+                        shading = getattr(space, "shading", None)
+                        if shading and hasattr(shading, "use_compositor"):
+                            shading.use_compositor = target_mode
+                            count += 1
+                area.tag_redraw()
+
+        status = "ON (Always)" if target_mode == 'ALWAYS' else "OFF"
+        self.report({'INFO'}, f"Viewport Compositor: {status}")
+        return {'FINISHED'}
+
+
+# ---------------------------------------------------------------------
+# FINAL VIDEO EXPORT & SPEEDUP RESTORE HANDLER
+# ---------------------------------------------------------------------
+
+_orig_engine_restore = {}
+
+@bpy.app.handlers.persistent
+def _vfx_restore_engine_on_render_end(*args):
+    global _orig_engine_restore
+    if not _orig_engine_restore:
+        return
+    for sc_name, orig in list(_orig_engine_restore.items()):
+        sc = bpy.data.scenes.get(sc_name)
+        if sc:
+            try:
+                sc.render.engine = orig
+                print(f"[VFX] Restored render engine for scene '{sc_name}' to {orig}")
+            except Exception as e:
+                print(f"[VFX] Error restoring engine: {e}")
+    _orig_engine_restore.clear()
+
+
+def _ensure_restore_handlers():
+    if _vfx_restore_engine_on_render_end not in bpy.app.handlers.render_complete:
+        bpy.app.handlers.render_complete.append(_vfx_restore_engine_on_render_end)
+    if _vfx_restore_engine_on_render_end not in bpy.app.handlers.render_cancel:
+        bpy.app.handlers.render_cancel.append(_vfx_restore_engine_on_render_end)
+
+
+class VFX_OT_export_final_video(bpy.types.Operator):
+    bl_idname = "vfx.export_final_video"
+    bl_label = "Рендер итогового видео (Композ)"
+    bl_description = "Собрать и отрендерить финальное видео или секвенцию из композитора"
+    bl_options = {'REGISTER'}
+
+    animation: BoolProperty(
+        name="Анимация",
+        description="Рендерить всю анимацию (иначе только текущий кадр)",
+        default=True,
+    )
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=True)
+        if not vfx or not master:
+            self.report({'ERROR'}, "Мастер-сцена не найдена")
+            return {'CANCELLED'}
+
+        # Ensure master is active
+        if context.window and context.window.scene != master:
+            context.window.scene = master
+
+        # Check if EXR cache exists when using speedup
+        out_abs = bpy.path.abspath(vfx.output_dir)
+        has_any_exr = False
+        if os.path.isdir(out_abs):
+            candidate_names = ["VFX_BG"] + [
+                (lyr.scene.name if lyr.scene else f"VFX_{lyr.layer_name}")
+                for lyr in vfx.layers
+            ]
+            for sc_name in candidate_names:
+                lyr_dir = os.path.join(out_abs, sc_name)
+                if os.path.isdir(lyr_dir):
+                    try:
+                        if any(f.lower().endswith(('.exr', '.png', '.tif', '.tiff')) for f in os.listdir(lyr_dir)):
+                            has_any_exr = True
+                            break
+                    except Exception:
+                        pass
+
+        # Setup compositor mode
+        if vfx.final_speedup:
+            if not has_any_exr and len(vfx.layers) > 0:
+                self.report(
+                    {'WARNING'},
+                    "В папке рендера нет EXR слоев! Для Турбо-сборки сначала отрендерите слои (1-Клик: Рендер ВСЕХ слоев)."
+                )
+            vfx.comp_mode = 'FILES'
+            rebuild_comp_from_files(vfx, master)
+        else:
+            if vfx.comp_mode == 'FILES':
+                rebuild_comp_from_files(vfx, master)
+            else:
+                rebuild_comp(vfx, master)
+
+        # Enable compositor and sequencer output on master scene
+        master.render.use_compositing = True
+        master.render.use_sequencer = True
+        try:
+            master.use_nodes = True
+        except Exception:
+            pass
+
+        # Prepare output path
+        raw_path = (vfx.final_output_path or "").strip()
+        if not raw_path:
+            raw_path = "//final_render/output.mp4"
+            vfx.final_output_path = raw_path
+
+        abs_target = bpy.path.abspath(raw_path)
+        fmt = vfx.final_format
+
+        if raw_path.endswith(('/', '\\')):
+            os.makedirs(abs_target, exist_ok=True)
+            if fmt in ('MP4', 'PRORES'):
+                master.render.filepath = raw_path + "final_"
+            else:
+                master.render.filepath = raw_path
+        else:
+            parent_dir = os.path.dirname(abs_target)
+            if parent_dir:
+                os.makedirs(parent_dir, exist_ok=True)
+            base, ext = os.path.splitext(raw_path)
+            if ext.lower() in ('.mp4', '.mov', '.png', '.exr', '.avi', '.mkv'):
+                master.render.filepath = base + ("" if base.endswith('_') else "_")
+            else:
+                master.render.filepath = raw_path
+
+        # Configure format and quality
+        img = master.render.image_settings
+        qual = vfx.final_quality
+
+        if fmt == 'MP4':
+            img.media_type = 'VIDEO'
+            img.file_format = 'FFMPEG'
+            ff = master.render.ffmpeg
+            ff.format = 'MPEG4'
+            ff.codec = 'H264'
+            if qual == 'LOSSLESS':
+                ff.constant_rate_factor = 'LOSSLESS'
+                ff.ffmpeg_preset = 'GOOD'
+            elif qual == 'MEDIUM':
+                ff.constant_rate_factor = 'MEDIUM'
+                ff.ffmpeg_preset = 'REALTIME'
+            else:
+                ff.constant_rate_factor = 'HIGH'
+                ff.ffmpeg_preset = 'GOOD'
+            # Enable audio if audio strips exist in sequencer or sounds are loaded
+            try:
+                has_audio = (
+                    master.sequence_editor and any(
+                        getattr(s, 'type', '') == 'SOUND'
+                        for s in getattr(master.sequence_editor, 'strips', [])
+                    )
+                ) or len(bpy.data.sounds) > 0
+                if has_audio:
+                    ff.audio_codec = 'AAC'
+                    ff.audio_bitrate = 192
+                else:
+                    ff.audio_codec = 'NONE'
+            except Exception:
+                ff.audio_codec = 'AAC'
+
+        elif fmt == 'PRORES':
+            img.media_type = 'VIDEO'
+            img.file_format = 'FFMPEG'
+            ff = master.render.ffmpeg
+            ff.format = 'QUICKTIME'
+            ff.codec = 'PRORES'
+            if qual == 'LOSSLESS':
+                ff.constant_rate_factor = 'LOSSLESS'
+            elif qual == 'MEDIUM':
+                ff.constant_rate_factor = 'MEDIUM'
+            else:
+                ff.constant_rate_factor = 'HIGH'
+            try:
+                ff.audio_codec = 'AAC'
+                ff.audio_bitrate = 192
+            except Exception:
+                pass
+
+        elif fmt == 'PNG':
+            img.media_type = 'IMAGE'
+            img.file_format = 'PNG'
+            img.color_mode = 'RGBA'
+            if qual == 'LOSSLESS':
+                img.color_depth = '16'
+            else:
+                img.color_depth = '8'
+
+        elif fmt == 'EXR':
+            img.media_type = 'IMAGE'
+            img.file_format = 'OPEN_EXR'
+            img.color_mode = 'RGBA'
+            if qual == 'LOSSLESS':
+                img.color_depth = '32'
+            else:
+                img.color_depth = '16'
+
+        # Apply turbo speedup (Workbench) if requested
+        if vfx.final_speedup and vfx.comp_mode == 'FILES':
+            _ensure_restore_handlers()
+            _orig_engine_restore[master.name] = master.render.engine
+            master.render.engine = 'BLENDER_WORKBENCH'
+
+        # Invoke render
+        try:
+            if self.animation:
+                bpy.ops.render.render('INVOKE_DEFAULT', animation=True)
+                self.report({'INFO'}, f"Запущен финальный экспорт ({fmt}) -> {master.render.filepath}")
+            else:
+                bpy.ops.render.render('INVOKE_DEFAULT', animation=False, write_still=True)
+                self.report({'INFO'}, f"Сохранен текущий кадр ({fmt}) -> {master.render.filepath}")
+        except Exception:
+            try:
+                if self.animation:
+                    bpy.ops.render.render(animation=True)
+                else:
+                    bpy.ops.render.render(animation=False, write_still=True)
+                self.report({'INFO'}, f"Экспорт завершен ({fmt}) -> {master.render.filepath}")
+            except Exception as err:
+                orig = _orig_engine_restore.pop(master.name, None)
+                if orig:
+                    master.render.engine = orig
+                self.report({'ERROR'}, f"Ошибка рендера: {err}")
+                return {'CANCELLED'}
+
+        return {'FINISHED'}
+
+
+class VFX_OT_open_output_folder(bpy.types.Operator):
+    bl_idname = "vfx.open_output_folder"
+    bl_label = "Открыть папку экспорта"
+    bl_description = "Открыть папку с отрендеренным видео или секвенцией в проводнике"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=False)
+        raw = (vfx.final_output_path or "").strip()
+        if not raw:
+            raw = "//final_render/"
+        abs_p = bpy.path.abspath(raw)
+
+        if not abs_p.endswith(('/', '\\')):
+            folder = os.path.dirname(abs_p)
+        else:
+            folder = abs_p
+
+        if not os.path.exists(folder):
+            try:
+                os.makedirs(folder, exist_ok=True)
+            except Exception:
+                pass
+
+        if not os.path.exists(folder):
+            self.report({'WARNING'}, f"Папка не существует: {folder}")
+            return {'CANCELLED'}
+
+        try:
+            if os.name == 'nt':
+                os.startfile(folder)
+            elif sys.platform == 'darwin':
+                subprocess.Popen(['open', folder])
+            else:
+                subprocess.Popen(['xdg-open', folder])
+            self.report({'INFO'}, f"Папка открыта: {folder}")
+        except Exception as e:
+            self.report({'ERROR'}, f"Не удалось открыть папку: {e}")
+            return {'CANCELLED'}
+
         return {'FINISHED'}

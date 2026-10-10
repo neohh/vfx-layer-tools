@@ -190,18 +190,17 @@ def remove_occlusion_collection(layer):
     if col is None:
         return
     for obj in list(col.objects):
-        if obj.get("vfx_proxy"):
-            try:
-                bpy.data.objects.remove(obj, do_unlink=True)
-            except Exception:
-                pass
+        try:
+            bpy.data.objects.remove(obj, do_unlink=True)
+        except Exception:
+            pass
     try:
         bpy.data.collections.remove(col)
     except Exception:
         pass
 
 
-def _occluder_layers(vfx, layer):
+def _occluder_layers(vfx, layer, master=None):
     """Layers whose objects should occlude `layer` (never itself)."""
     mode = getattr(layer, "occlusion_mode", 'AUTO')
     if mode == 'OFF':
@@ -210,8 +209,24 @@ def _occluder_layers(vfx, layer):
         include = {r.layer_id for r in layer.occlusion_layers if r.include}
         return [o for o in vfx.layers
                 if o.id != layer.id and o.enabled and o.id in include]
-    return [o for o in vfx.layers
-            if o.id != layer.id and o.enabled]
+
+    # In AUTO mode: if this layer is marked as 'Static (1 Frame)', it is typically
+    # a backdrop/matte-painting (e.g. Moon, background mountains) where objects in front
+    # are simply alpha-overlaid in compositing. We exclude occluders that are composited
+    # in front of this layer so the static layer is rendered clean with zero holes!
+    all_others = [o for o in vfx.layers if o.id != layer.id and o.enabled]
+    if getattr(layer, "is_static", False):
+        try:
+            order = compute_composite_order(vfx, master, verbose=False)
+            if layer in order:
+                idx = order.index(layer)
+                # Only layers behind this layer could possibly occlude it (which is none),
+                # so a static layer needs no holdout cuts from layers in front of it!
+                return [o for o in all_others if o in order and order.index(o) < idx]
+        except Exception:
+            pass
+
+    return all_others
 
 
 # ---------------------------------------------------------------------
@@ -245,9 +260,8 @@ def rebuild_layer_occlusion(vfx, master, layer):
 
     mode = getattr(layer, "occlusion_mode", 'AUTO')
     if mode == 'OFF':
-        if occl is not None:
-            remove_occlusion_collection(layer)
-            layer.occlusion_collection = None
+        remove_occlusion_collection(layer)
+        layer.occlusion_collection = None
         return 0
 
     col = _ensure_occlusion_collection(layer, master)
@@ -255,7 +269,7 @@ def rebuild_layer_occlusion(vfx, master, layer):
 
     # expected proxy names from current occluders
     expected = {}
-    for other in _occluder_layers(vfx, layer):
+    for other in _occluder_layers(vfx, layer, master):
         if not other.collection:
             continue
         for obj in other.collection.objects:
@@ -311,19 +325,44 @@ def rebuild_all_occlusion(vfx, master, report=False):
 # ---------------------------------------------------------------------
 
 def _camera_distance(master, layer):
-    """Distance from camera to the NEAREST drawable object of the layer."""
+    """Distance from camera to the NEAREST drawable object of the layer,
+    measured along the camera's optical view axis (with euclidean distance fallback).
+    Uses the evaluated depsgraph so animations and constraints are fully accounted for.
+    """
     cam_obj = getattr(master, "camera", None) if master else None
     if cam_obj is None:
         return None
-    cam_pos = cam_obj.matrix_world.translation
+
+    try:
+        dg = bpy.context.evaluated_depsgraph_get()
+    except Exception:
+        dg = None
+
+    try:
+        eval_cam = cam_obj.evaluated_get(dg) if dg is not None else cam_obj
+        cam_mat = eval_cam.matrix_world
+        cam_pos = cam_mat.translation
+        # Camera optical axis: -Z in camera local coordinates
+        cam_fwd = -cam_mat.col[2].xyz.normalized()
+    except Exception:
+        cam_mat = cam_obj.matrix_world
+        cam_pos = cam_mat.translation
+        cam_fwd = None
+
     best = None
     if layer.collection:
         for obj in layer.collection.objects:
             if obj.type not in DRAWABLE or getattr(obj, "hide_render", False):
                 continue
             try:
-                corners = [obj.matrix_world @ Vector(c) for c in obj.bound_box]
-                d = min((p - cam_pos).length for p in corners)
+                eval_obj = obj.evaluated_get(dg) if dg is not None else obj
+                mat = eval_obj.matrix_world
+                corners = [mat @ Vector(c) for c in eval_obj.bound_box]
+                if cam_fwd is not None:
+                    # Depth along camera view axis (positive in front of camera)
+                    d = min((p - cam_pos).dot(cam_fwd) for p in corners)
+                else:
+                    d = min((p - cam_pos).length for p in corners)
             except Exception:
                 continue
             if best is None or d < best:
@@ -379,8 +418,8 @@ def occlusion_self_check(vfx, master):
     for layer in vfx.layers:
         mode = getattr(layer, "occlusion_mode", 'AUTO')
         occl = getattr(layer, "occlusion_collection", None)
-        occluders = [o.layer_name for o in _occluder_layers(vfx, layer)]
-        if layer.id in [o.id for o in _occluder_layers(vfx, layer)]:
+        occluders = [o.layer_name for o in _occluder_layers(vfx, layer, master)]
+        if layer.id in [o.id for o in _occluder_layers(vfx, layer, master)]:
             problems.append(f"layer {layer.layer_name}: occludes ITSELF")
         if mode == 'OFF':
             ok = occl is None or len(occl.objects) == 0

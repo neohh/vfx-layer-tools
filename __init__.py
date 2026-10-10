@@ -1,14 +1,14 @@
 bl_info = {
     "name": "VFX Layer Tools",
     "author": "VFX Pipeline",
-    "version": (3, 11, 1),
+    "version": (3, 17, 0),
     "blender": (5, 2, 1),
     "location": "View3D > Sidebar > VFX",
     "description": "VFX layer / scene / compositing manager",
     "category": "Compositing",
 }
 
-VFX_VERSION = "3.11.1"
+VFX_VERSION = "3.17.0"
 
 import bpy
 import importlib
@@ -66,6 +66,14 @@ def _auto_mask(ctx, source):
 
 def _dof_changed(ctx):
     _auto_mask(ctx, 'DOF')
+    try:
+        sc = ctx.scene
+        cam_obj = sc.camera or bpy.data.objects.get("VFX_Camera")
+        if cam_obj and cam_obj.data and hasattr(cam_obj.data, "dof"):
+            cam_obj.data.dof.focus_distance = sc.vfx.dof_focus
+            cam_obj.data.show_limits = True
+    except Exception:
+        pass
     _trigger_comp(ctx)
 
 
@@ -124,6 +132,11 @@ class VFXLayer(bpy.types.PropertyGroup):
     id: StringProperty(default="")
     layer_name: StringProperty(default="Layer")
     enabled: BoolProperty(default=True)
+    selected: BoolProperty(
+        name="Selected",
+        description="Select layer for batch operations (e.g. Render Selected)",
+        default=False
+    )
 
     collection: PointerProperty(type=bpy.types.Collection)
     scene: PointerProperty(type=bpy.types.Scene)
@@ -220,6 +233,21 @@ class VFXLayer(bpy.types.PropertyGroup):
         default=False
     )
 
+    # -- Static (single frame) render & hold --
+    is_static: BoolProperty(
+        name="Static (1 Frame)",
+        description="Render only a single frame and hold it across the whole project duration",
+        default=False,
+        update=lambda self, ctx: _trigger_comp(ctx)
+    )
+    static_frame: IntProperty(
+        name="Static Frame",
+        description="Frame number to render and hold",
+        default=1,
+        min=0,
+        update=lambda self, ctx: _trigger_comp(ctx)
+    )
+
     # -- Inter-layer occlusion (holdout) --
     occlusion_mode: EnumProperty(
         name="Occlusion",
@@ -236,6 +264,11 @@ class VFXLayer(bpy.types.PropertyGroup):
     occlusion_expanded: BoolProperty(
         name="Occlusion expanded",
         description="Show occlusion section of this layer",
+        default=False,
+    )
+    extra_settings_expanded: BoolProperty(
+        name="Extra Layer Adjustments",
+        description="Expand fine-tuning for this layer (grade, cryptomatte mask, custom holdout)",
         default=False,
     )
 
@@ -277,6 +310,20 @@ class VFXLayer(bpy.types.PropertyGroup):
         update=lambda s, c: _trigger_comp(c)
     )
 
+    # -- Per-layer Depth of Field / Blur fine-tuning --
+    blur_multiplier: FloatProperty(
+        name="Множитель блюра",
+        description="Множитель размытия для этого слоя (1.0 = по общей карте Mist, 0.0 = оставить резким, >1.0 = размыть сильнее)",
+        default=1.0, min=0.0, max=5.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    blur_override: FloatProperty(
+        name="Фиксированный блюр (px)",
+        description="Принудительный радиус блюра в пикселях (если > 0, переопределяет карту Mist для этого слоя)",
+        default=0.0, min=0.0, max=300.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+
 
 class VFXProject(bpy.types.PropertyGroup):
     master_scene: PointerProperty(type=bpy.types.Scene)
@@ -315,6 +362,46 @@ class VFXProject(bpy.types.PropertyGroup):
         description="Use master scene world in layer scenes by default",
         default=True
     )
+    render_settings_expanded: BoolProperty(
+        name="Render Settings Expanded",
+        description="Show engines and output directory settings",
+        default=False
+    )
+    use_parallel_render: BoolProperty(
+        name="Параллельный рендер",
+        description="Рендерить кадры параллельными фоновыми процессами Blender (сильно ускоряет рендер секвенций на RTX 5080)",
+        default=False
+    )
+    parallel_instances: IntProperty(
+        name="Потоков",
+        description="Количество параллельных фоновых процессов Blender",
+        default=2,
+        min=2,
+        max=4
+    )
+    resume_render: BoolProperty(
+        name="Дорендеривать (не начинать с нуля)",
+        description="Проверять готовые кадры на диске и продолжать рендер с места остановки, пропуская уже отрендеренное",
+        default=True
+    )
+    render_format: EnumProperty(
+        name="Формат файлов",
+        items=(
+            ('OPEN_EXR', "OpenEXR (.exr)", "32-bit float OpenEXR — стандарт для VFX и композитинга"),
+            ('PNG', "PNG (.png)", "16-bit RGBA PNG — компактный формат без потерь"),
+        ),
+        default='OPEN_EXR',
+        description="Формат файлов для рендера слоев и тени"
+    )
+    fog_map_format: EnumProperty(
+        name="Формат Mist",
+        items=(
+            ('PNG', "PNG (.png)", "16-bit RGBA PNG — компактный и быстрый формат, идеально для карты глубины Mist"),
+            ('OPEN_EXR', "OpenEXR (.exr)", "32-bit float OpenEXR"),
+        ),
+        default='PNG',
+        description="Формат файлов для рендера карты Mist / глубины"
+    )
     render_running: BoolProperty(default=False)
     render_progress: FloatProperty(default=0.0, min=0.0, max=1.0)
     render_status: StringProperty(default="")
@@ -326,10 +413,64 @@ class VFXProject(bpy.types.PropertyGroup):
         ),
         default='FILES'
     )
+    final_export_expanded: BoolProperty(
+        name="Финальный экспорт",
+        description="Развернуть блок настроек финального экспорта видео",
+        default=True,
+    )
+    final_output_path: StringProperty(
+        name="Файл вывода",
+        description="Путь и имя файла для сохранения итогового видео или секвенции",
+        default="//final_render/output.mp4",
+        subtype='FILE_PATH',
+    )
+    final_format: EnumProperty(
+        name="Формат видео",
+        items=(
+            ('MP4', "MP4 (H.264 Video)", "Готовое видео MP4 (H.264, универсальный формат высокого качества)"),
+            ('PNG', "PNG Секвенция", "Последовательность кадров PNG (с альфа-каналом без потерь)"),
+            ('PRORES', "ProRes (MOV)", "Apple ProRes QuickTime — профессиональный стандарт для монтажа"),
+            ('EXR', "OpenEXR Секвенция", "32-bit Float Master EXR — максимальное качество без потерь"),
+        ),
+        default='MP4',
+        description="Формат итогового файла видео"
+    )
+    final_quality: EnumProperty(
+        name="Качество H.264",
+        items=(
+            ('HIGH', "Высокое (Perceptually Lossless)", "Отличное визуальное качество без видимых артефактов"),
+            ('MEDIUM', "Среднее (Компактный размер)", "Баланс между качеством и размером файла"),
+            ('LOSSLESS', "Lossless (Без сжатия)", "Идеальное качество 1:1, большой размер файла"),
+        ),
+        default='HIGH'
+    )
+    final_speedup: BoolProperty(
+        name="Турбо-сборка (Workbench)",
+        description="Временно собирает кадры через быстрый Workbench (0.1–0.2с на кадр), минуя повторный 3D-просчет сцены",
+        default=True
+    )
     bg_scene: PointerProperty(
         type=bpy.types.Scene,
         name="Background scene",
         description="World-only background pass, always bottom of comp"
+    )
+    bg_is_static: BoolProperty(
+        name="BG Static (1 Frame)",
+        description="Render only a single frame for background and hold it",
+        default=True,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    bg_static_frame: IntProperty(
+        name="BG Static Frame",
+        description="Frame number to render and hold for background",
+        default=1,
+        min=0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    show_hints: BoolProperty(
+        name="Show Help & Guides",
+        description="Show helpful explanations, tips and workflow guides in the UI",
+        default=True
     )
     fog_map_scene: PointerProperty(
         type=bpy.types.Scene,
@@ -622,8 +763,8 @@ class VFXProject(bpy.types.PropertyGroup):
         update=lambda s, c: _dof_changed(c)
     )
     dof_maxblur: FloatProperty(
-        name="Max Blur", default=0.5, min=0.0, max=1.0,
-        description="Maximum blur amount at Far End (0 = sharp)",
+        name="Max Blur (px)", default=25.0, min=0.0, max=300.0, soft_max=100.0,
+        description="Maximum blur radius in pixels at Far End (0 = sharp)",
         update=lambda s, c: _dof_changed(c)
     )
     dof_focus: FloatProperty(
@@ -779,7 +920,7 @@ from .operators import (
     VFX_OT_drag_layer, VFX_OT_move_layer_up, VFX_OT_move_layer_down,
     VFX_OT_debug_layer, VFX_OT_rebuild_comp,
     VFX_OT_render_all_layers, VFX_OT_one_click_exr,
-    VFX_OT_one_click_exr_single,
+    VFX_OT_one_click_exr_single, VFX_OT_render_fog_map, VFX_OT_stop_render,
     VFX_OT_create_background, VFX_OT_delete_background,
     VFX_OT_delete_shadow_pass, VFX_OT_refresh_proxies,
     VFX_OT_refresh_occlusion,
@@ -787,7 +928,9 @@ from .operators import (
     VFX_OT_setup_light_groups, VFX_OT_apply_color_preset,
     VFX_OT_preview_this_mask, VFX_OT_pick_cryptomatte,
     VFX_OT_reset_layer_grade, VFX_OT_reset_master_grade,
-    VFX_OT_copy_master_grade,
+    VFX_OT_copy_master_grade, VFX_OT_toggle_viewport_compositor,
+    VFX_OT_select_layer_objects,
+    VFX_OT_export_final_video, VFX_OT_open_output_folder,
 )
 from .ui import (
     VFX_UL_layers, VFX_PT_main, VFX_PT_post_effects,
@@ -814,6 +957,7 @@ classes = (
     VFX_OT_create_layer,
     VFX_OT_add_selected_to_layer,
     VFX_OT_remove_selected_from_layer,
+    VFX_OT_select_layer_objects,
     VFX_OT_add_selected_lights,
     VFX_OT_create_shadow_pass,
     VFX_OT_delete_layer,
@@ -829,6 +973,8 @@ classes = (
     VFX_OT_render_all_layers,
     VFX_OT_one_click_exr,
     VFX_OT_one_click_exr_single,
+    VFX_OT_render_fog_map,
+    VFX_OT_stop_render,
     VFX_OT_create_background,
     VFX_OT_delete_background,
     VFX_OT_delete_shadow_pass,
@@ -840,6 +986,9 @@ classes = (
     VFX_OT_reset_layer_grade,
     VFX_OT_reset_master_grade,
     VFX_OT_copy_master_grade,
+    VFX_OT_toggle_viewport_compositor,
+    VFX_OT_export_final_video,
+    VFX_OT_open_output_folder,
     VFX_PT_main,
     VFX_PT_post_effects,
     VFX_PT_compositor,

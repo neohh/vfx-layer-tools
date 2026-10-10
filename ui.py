@@ -1,11 +1,41 @@
 """VFX Layer Tools — UI panels and list widget."""
 
 import bpy
+import os
 
 from . import VFX_VERSION
 from .core import get_project, active_layer
 from .materials import _last_adjust_stats
 from .occlusion import compute_composite_order, _camera_distance
+
+
+def _get_rendered_frames_badge(scene, vfx, master, is_static=False):
+    """Scan folder and return (badge_text, icon) showing rendered frames."""
+    if not scene or not vfx:
+        return "", 'BLANK1'
+    base_dir = bpy.path.abspath(vfx.output_dir) if vfx.output_dir else ""
+    if not base_dir:
+        return "", 'BLANK1'
+    folder = os.path.join(base_dir, scene.name)
+    total = 1 if is_static else max(1, master.frame_end - master.frame_start + 1)
+    if not os.path.exists(folder):
+        return f"{0}/{total}", 'BLANK1'
+
+    fmt = getattr(vfx, "render_format", 'OPEN_EXR')
+    target_ext = '.png' if fmt == 'PNG' else '.exr'
+    try:
+        files = [f for f in os.listdir(folder) if f.lower().endswith(target_ext)]
+        if not files:
+            files = [f for f in os.listdir(folder) if f.lower().endswith(('.exr', '.png'))]
+        count = len(files)
+    except Exception:
+        count = 0
+
+    if count >= total:
+        return f"{count}/{total}", 'CHECKMARK'
+    elif count > 0:
+        return f"{count}/{total}", 'TIME'
+    return f"{0}/{total}", 'BLANK1'
 
 
 # ---------------------------------------------------------------------
@@ -15,9 +45,12 @@ from .occlusion import compute_composite_order, _camera_distance
 class VFX_UL_layers(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         has_shd = bool(item.shadow_scene)
+        vfx = context.scene.vfx
+        master = getattr(vfx, "master_scene", None) or context.scene
 
         row = layout.row(align=True)
-        row.prop(item, "enabled", text="")
+        row.prop(item, "selected", text="")
+        row.prop(item, "enabled", text="", icon='HIDE_OFF' if item.enabled else 'HIDE_ON', emboss=False)
 
         if has_shd:
             tog = row.operator(
@@ -34,6 +67,21 @@ class VFX_UL_layers(bpy.types.UIList):
             row.label(text=item.layer_name, icon='SCENE_DATA')
         else:
             row.label(text=item.layer_name, icon='ERROR')
+
+        # Frame badge showing rendered frames (e.g. 76/76 or 15/76)
+        b_text, b_icon = _get_rendered_frames_badge(item.scene, vfx, master, is_static=item.is_static)
+        if b_text:
+            badge_sub = row.row(align=True)
+            badge_sub.alignment = 'RIGHT'
+            badge_sub.label(text=b_text, icon=b_icon)
+
+        sel_btn = row.operator(
+            "vfx.select_layer_objects",
+            text="",
+            icon='RESTRICT_SELECT_OFF',
+            emboss=False
+        )
+        sel_btn.layer_index = index
 
         rr = row.operator(
             "vfx.render_all_layers",
@@ -58,6 +106,13 @@ class VFX_UL_layers(bpy.types.UIList):
             shd_row.label(text="", icon='BLANK1')
             shd_row.label(text="", icon='BLANK1')
             shd_row.label(text="shadow", icon='LIGHT')
+
+            shd_text, shd_icon = _get_rendered_frames_badge(item.shadow_scene, vfx, master)
+            if shd_text:
+                shd_sub = shd_row.row(align=True)
+                shd_sub.alignment = 'RIGHT'
+                shd_sub.label(text=shd_text, icon=shd_icon)
+
             rr2 = shd_row.operator(
                 "vfx.render_all_layers",
                 text="",
@@ -106,6 +161,11 @@ def _draw_layer_list(context, layout):
         rbg.refresh_after = True
         r.operator("vfx.delete_background", text="", icon='X')
 
+        b_st = bgbox.row(align=True)
+        b_st.prop(vfx, "bg_is_static", text="Static (1 Frame)", icon='IMAGE_DATA')
+        if vfx.bg_is_static:
+            b_st.prop(vfx, "bg_static_frame", text="Frame")
+
     row = layout.row(align=True)
     row.operator("vfx.move_layer_up", icon='TRIA_UP', text="Up / Forward")
     row.operator("vfx.move_layer_down", icon='TRIA_DOWN', text="Down / Back")
@@ -117,42 +177,45 @@ def _draw_layer_list(context, layout):
         box.label(text=layer.layer_name, icon='SCENE_DATA')
 
         row = box.row(align=True)
-        row.operator("vfx.add_selected_to_layer", text="Add Sel")
-        row.operator("vfx.remove_selected_from_layer", text="Remove Sel")
+        row.operator("vfx.select_layer_objects", text="Выделить объекты", icon='RESTRICT_SELECT_OFF')
+        row.operator("vfx.add_selected_to_layer", text="+ Add", icon='PLUS')
+        row.operator("vfx.remove_selected_from_layer", text="- Remove", icon='X')
 
         row = box.row(align=True)
         row.operator("vfx.rename_layer", text="Rename Layer")
         row.operator("vfx.delete_layer", text="Delete", icon='X')
 
-        box.prop(layer, "shadow_catcher", text="Catcher")
+        # Static 1-frame hold option
+        st_row = box.row(align=True)
+        st_row.prop(layer, "is_static", text="Статика (1 кадр)", icon='IMAGE_DATA')
+        if layer.is_static:
+            st_row.prop(layer, "static_frame", text="Кадр")
+        if vfx.show_hints and layer.is_static:
+            box.label(text="Рендерит только 1 кадр и удерживает его на всю анимацию (для Луны/фонов)", icon='HELP')
 
-        # ── PER-LAYER EFFECTS: one visible section at a time ──
-        box.prop(vfx, "fx_mode", text="FX")
-        fx = vfx.fx_mode
-
-        if fx == 'SHADOW':
-            srow = box.row(align=True)
-            if not layer.shadow_scene:
-                srow.operator("vfx.create_shadow_pass", icon='LIGHT')
-            else:
-                srow.label(text=f"Shadow pass: {layer.shadow_mode}", icon='CHECKMARK')
-                srow.operator("vfx.refresh_proxies", text="", icon='FILE_REFRESH')
-                srow.operator("vfx.delete_shadow_pass", text="", icon='X')
-                box.prop(layer, "shadow_strength")
-
-        if fx == 'FOG' and vfx.use_fog:
-            box.label(text="Fog is global — see FOG above", icon='FORCE_WIND')
+        # Shadow catcher and pass
+        box.prop(layer, "shadow_catcher", text="Кетчер тени")
+        if not layer.shadow_scene:
+            box.operator("vfx.create_shadow_pass", text="Добавить пасс тени", icon='LIGHT')
+        else:
+            sh_row = box.row(align=True)
+            sh_row.label(text=f"Тень: {layer.shadow_mode}", icon='CHECKMARK')
+            sh_row.prop(layer, "shadow_strength", text="Сила")
+            sh_row.operator("vfx.refresh_proxies", text="", icon='FILE_REFRESH')
+            sh_row.operator("vfx.delete_shadow_pass", text="", icon='X')
 
         # ── OCCLUSION (holdout) ──
         obox = box.box()
         ohead = obox.row(align=True)
         ohead.prop(layer, "occlusion_expanded", text="", icon='TRIA_DOWN' if layer.occlusion_expanded else 'TRIA_RIGHT', emboss=False)
-        ohead.label(text="OCCLUSION", icon='MOD_BOOLEAN')
+        ohead.label(text="ПЕРЕКРЫТИЕ (Окклюзия)", icon='MOD_BOOLEAN')
         ohead.prop(layer, "occlusion_mode", text="")
         if layer.occlusion_expanded:
             oc = obox.column(align=True)
+            if vfx.show_hints:
+                oc.label(text="Holdout делает вырез в слое там, где его перекрывают другие объекты в 3D.", icon='HELP')
             if layer.occlusion_mode == 'MANUAL':
-                oc.label(text="Occluder layers:", icon='RESTRICT_RENDER_ON')
+                oc.label(text="Слои, вырезающие этот слой (окклюдеры):", icon='RESTRICT_RENDER_ON')
                 for ref in layer.occlusion_layers:
                     other = next((l for l in vfx.layers if l.id == ref.layer_id), None)
                     if other is None:
@@ -165,46 +228,53 @@ def _draw_layer_list(context, layout):
                 others = [l.layer_name for l in vfx.layers
                           if l.id != layer.id and l.enabled]
                 if others:
-                    oc.label(text=f"Occluders: all other layers ({len(others)})", icon='INFO')
+                    oc.label(text=f"Авто-перекрытие: все слои спереди ({len(others)})", icon='INFO')
                     oc.label(text=" | ".join(others), icon='DOT')
                 else:
-                    oc.label(text="No other layers yet", icon='INFO')
+                    oc.label(text="Нет других слоев", icon='INFO')
             else:  # OFF
-                oc.label(text="Occlusion disabled", icon='X')
+                oc.label(text="Окклюзия выключена (слой рендерится целиком без вырезов)", icon='X')
             n_prox = 0
             if layer.occlusion_collection:
                 n_prox = sum(1 for o in layer.occlusion_collection.objects
                              if o.get("vfx_proxy"))
-            oc.label(text=f"Holdout proxies: {n_prox}", icon='MOD_MESHDEFORM')
+            oc.label(text=f"Holdout-прокси: {n_prox}", icon='MOD_MESHDEFORM')
 
-        box.separator()
-        if fx == 'ADJUST':
-            box.prop(layer, "use_adjust")
-            if layer.use_adjust:
-                st = _last_adjust_stats
-                if st["notes"]:
-                    for n in st["notes"]:
-                        box.label(text=n, icon='ERROR')
-                else:
-                    box.label(text=f"{st['applied']}/{st['materials']} materials adjusted", icon='CHECKMARK')
-                adj = box.column(align=True)
-                adj.prop(layer, "exposure")
-                adj.prop(layer, "contrast")
-                adj.prop(layer, "saturation")
-                adj.prop(layer, "tint_strength")
-                if layer.tint_strength > 0.0:
-                    adj.prop(layer, "tint_color", text="")
-                adj.operator("vfx.reset_lighting", icon='LOOP_BACK')
+        # ── EXTRA LAYER ADJUSTMENTS (Collapsible fine-tuning) ──
+        ext_box = box.box()
+        ext_head = ext_box.row(align=True)
+        ext_head.prop(layer, "extra_settings_expanded", text="",
+                      icon='TRIA_DOWN' if layer.extra_settings_expanded else 'TRIA_RIGHT', emboss=False)
+        ext_head.label(text="ДОП. НАСТРОЙКИ СЛОЯ", icon='PREFERENCES')
+        if getattr(vfx, "use_dof", False) and layer.blur_multiplier != 1.0:
+            ext_head.label(text=f"Блюр {layer.blur_multiplier:.1f}x", icon='CAMERA_DATA')
+        if layer.grade_enable:
+            ext_head.label(text="Грейд ВКЛ", icon='COLOR')
 
-        # ── Per-layer GRADE ──
-        if fx == 'GRADE':
-            box.separator()
-            gbox = box.box()
-            gr = gbox.row(align=True)
-            gr.prop(layer, "grade_enable", text="")
-            gr.label(text="GRADE", icon='COLOR')
+        if layer.extra_settings_expanded:
+            ext_col = ext_box.column(align=True)
+            if vfx.show_hints:
+                ext_col.label(text="Тонкая настройка цвета, масок и пипетки Cryptomatte ДЛЯ ЭТОГО СЛОЯ:", icon='HELP')
+
+            # Per-layer Blur / Depth of field fine-tuning
+            if getattr(vfx, "use_dof", False):
+                blur_box = ext_col.box()
+                blur_box.label(text="Подстройка размытия (DOF)", icon='CAMERA_DATA')
+                bc = blur_box.column(align=True)
+                bc.prop(layer, "blur_multiplier", text="Влияние блюра")
+                if layer.blur_multiplier == 0.0:
+                    bc.label(text="Слой останется идеально резким", icon='INFO')
+                elif layer.blur_multiplier != 1.0:
+                    bc.label(text=f"Блюр масштабирован в {layer.blur_multiplier:.1f}x", icon='INFO')
+                bc.prop(layer, "blur_override", text="Фикс. блюр (px)")
+                if layer.blur_override > 0.0:
+                    bc.label(text=f"Переопределено: {layer.blur_override:.0f} px (игнорирует карту)", icon='INFO')
+                ext_col.separator()
+            gr_head = ext_col.row(align=True)
+            gr_head.prop(layer, "grade_enable", text="")
+            gr_head.label(text="Цветокоррекция слоя (Grade)", icon='COLOR')
             if layer.grade_enable:
-                gc = gbox.column(align=True)
+                gc = ext_col.column(align=True)
                 gc.prop(layer, "l_exposure")
                 gc.prop(layer, "l_temp")
                 gc.prop(layer, "l_tint")
@@ -213,12 +283,14 @@ def _draw_layer_list(context, layout):
                 row_lgg = gc.row(align=True)
                 row_lgg.prop(layer, "l_lift", text="Lift")
                 row_lgg.prop(layer, "l_gain", text="Gain")
-                gbox.operator("vfx.reset_layer_grade", icon='LOOP_BACK')
-                # MASK for per-layer grade (default: alpha silhouette)
+                gc.operator("vfx.reset_layer_grade", text="Сбросить грейд", icon='LOOP_BACK')
+
+                # Masking for per-layer grade
+                gc.separator()
                 lam = gc.row(align=True)
-                lam.prop(layer, "use_alpha_mask", icon='MOD_MASK')
+                lam.prop(layer, "use_alpha_mask", text="По силуэту слоя", icon='MOD_MASK')
                 if not layer.use_alpha_mask:
-                    gc.prop(layer, "grade_mask_source", text="Mask")
+                    gc.prop(layer, "grade_mask_source", text="Маска")
                     if layer.grade_mask_source == 'DEPTH':
                         lr = gc.row(align=True)
                         lr.prop(layer, "grade_mask_depth_start")
@@ -229,11 +301,32 @@ def _draw_layer_list(context, layout):
                         lr.prop(layer, "grade_mask_luma_hi")
                     elif layer.grade_mask_source == 'EXT':
                         gc.prop(layer, "grade_mask_ext_node")
-                        pk = gc.operator("vfx.pick_cryptomatte", text="Pick Object (pipette)", icon='EYEDROPPER')
+                        pk = gc.operator("vfx.pick_cryptomatte", text="Пипетка Cryptomatte (объект)", icon='EYEDROPPER')
                         pk.target = 'LAYER'
                     r3 = gc.row(align=True)
                     r3.prop(layer, "grade_mask_invert")
                     r3.prop(layer, "grade_mask_soft")
+
+            ext_col.separator()
+            # Material Lighting Adjust
+            ext_col.prop(layer, "use_adjust", text="Прямая подстройка материалов")
+            if layer.use_adjust:
+                if vfx.show_hints:
+                    ext_col.label(text="Меняет экспозицию/контраст прямо в Principled BSDF материалах слоя", icon='HELP')
+                st = _last_adjust_stats
+                if st["notes"]:
+                    for n in st["notes"]:
+                        ext_col.label(text=n, icon='ERROR')
+                else:
+                    ext_col.label(text=f"Настроено {st['applied']}/{st['materials']} материалов", icon='CHECKMARK')
+                adj = ext_col.column(align=True)
+                adj.prop(layer, "exposure")
+                adj.prop(layer, "contrast")
+                adj.prop(layer, "saturation")
+                adj.prop(layer, "tint_strength")
+                if layer.tint_strength > 0.0:
+                    adj.prop(layer, "tint_color", text="")
+                adj.operator("vfx.reset_lighting", text="Сбросить свет материалов", icon='LOOP_BACK')
 
 
 _CRYPTO_UI = {
@@ -329,72 +422,82 @@ def _draw_post_effects(context, layout):
         icon='TRIA_DOWN' if vfx.fog_expanded else 'TRIA_RIGHT',
         emboss=False
     )
-    fr.label(text="FOG", icon='FORCE_WIND')
+    fr.label(text="ТУМАН (Fog)", icon='FORCE_WIND')
     fr.prop(vfx, "use_fog", text="")
     if vfx.fog_expanded:
         fb = fogbox.column(align=True)
+        if getattr(vfx, "show_hints", False):
+            fb.label(text="Атмосферный туман по глубине камеры (в метрах):", icon='HELP')
         fr2 = fb.row(align=True)
-        fr2.prop(vfx, "ramp_black")
-        fr2.prop(vfx, "ramp_white")
-        fb.prop(vfx, "fog_density")
-        fb.prop(vfx, "fog_color", text="Fog Color")
-        fb.label(text="Fog curve: edit VFX FOG node > FOG MAP RAMP",
-                 icon='INFO')
-        fb.label(text="Dark fog: pull ramp black stop up / raise its color",
-                 icon='INFO')
+        fr2.prop(vfx, "ramp_black", text="Начало")
+        fr2.prop(vfx, "ramp_white", text="Максимум")
+        fb.prop(vfx, "fog_density", text="Плотность")
+        fb.prop(vfx, "fog_color", text="Цвет тумана")
         _draw_crypto_influence(context, fb, vfx, "crypto_on_fog")
+        row_rf = fb.row(align=True)
+        row_rf.operator("vfx.render_fog_map", text="Рендер секвенции Mist (EEVEE)", icon='RENDER_ANIMATION')
+        row_rf.prop(vfx, "fog_map_format", text="")
     dofbox = layout.box()
     dh = dofbox.row(align=True)
     dh.prop(vfx, "use_dof", text="")
-    dh.label(text="CAMERA FOCUS (DOF)", icon='CAMERA_DATA')
+    dh.label(text="РАЗМЫТИЕ ПО ГЛУБИНЕ (Mist / DOF)", icon='CAMERA_DATA')
     if vfx.use_dof:
         dc = dofbox.column(align=True)
-        dc.prop(vfx, "dof_focus")
+        if getattr(vfx, "show_hints", False):
+            dc.label(text="Размытие заднего плана по карте Mist (редактируйте ColorRamp в группе VFX_DOF_PRE)", icon='HELP')
         dr = dc.row(align=True)
-        dr.prop(vfx, "dof_far_start")
-        dr.prop(vfx, "dof_far_end")
-        dc.prop(vfx, "dof_maxblur")
-        dc.label(text="Ramp: edit DOF FOCUS RAMP node in comp", icon='INFO')
+        dr.prop(vfx, "dof_far_start", text="Начало")
+        dr.prop(vfx, "dof_far_end", text="Максимум")
+        dc.prop(vfx, "dof_maxblur", text="Сила размытия (px)")
+        row_rd = dc.row(align=True)
+        row_rd.operator("vfx.render_fog_map", text="Рендер секвенции Mist (EEVEE)", icon='RENDER_ANIMATION')
+        row_rd.prop(vfx, "fog_map_format", text="")
         _draw_crypto_influence(context, dc, vfx, "crypto_on_dof")
         _draw_mask_section(context, dc, vfx, "dof", ('ALPHA', 'DEPTH', 'LUMA', 'EXT'))
     glowbox = layout.box()
     gr = glowbox.row(align=True)
     gr.prop(vfx, "use_glare", text="")
-    gr.label(text="GLOW / GLARE", icon='LIGHT_SUN')
+    gr.label(text="СВЕЧЕНИЕ / БЛИКИ (Glow)", icon='LIGHT_SUN')
     if vfx.use_glare:
         gc = glowbox.column(align=True)
-        gc.prop(vfx, "glare_type", text="")
-        gc.prop(vfx, "glare_strength")
-        gc.prop(vfx, "glare_threshold")
-        gc.prop(vfx, "glare_size")
+        if getattr(vfx, "show_hints", False):
+            gc.label(text="Оптическое свечение (Bloom) вокруг ярких источников света и магии", icon='HELP')
+        gc.prop(vfx, "glare_type", text="Тип")
+        gc.prop(vfx, "glare_strength", text="Яркость")
+        gc.prop(vfx, "glare_threshold", text="Порог яркости")
+        gc.prop(vfx, "glare_size", text="Размер ореола")
         _draw_crypto_influence(context, gc, vfx, "crypto_on_glare")
         _draw_mask_section(context, gc, vfx, "glare", ('ALPHA', 'DEPTH', 'LUMA', 'EXT'))
     ldbox = layout.box()
     lbw = ldbox.row(align=True)
     lbw.prop(vfx, "use_lensdist", text="")
-    lbw.label(text="LENS DISTORTION", icon='VIEW_CAMERA')
+    lbw.label(text="ИСКАЖЕНИЯ ЛИНЗЫ (Distortion)", icon='VIEW_CAMERA')
     if vfx.use_lensdist:
         lc = ldbox.column(align=True)
-        lc.prop(vfx, "lensdist_distort")
-        lc.prop(vfx, "lensdist_disperse")
+        if getattr(vfx, "show_hints", False):
+            lc.label(text="Дисторсия объектива и радужная кайма (хроматика) по краям кадра", icon='HELP')
+        lc.prop(vfx, "lensdist_distort", text="Дисторсия")
+        lc.prop(vfx, "lensdist_disperse", text="Хроматика")
     # ── MASTER GRADE (primary correction, applied first in chain) ──
     mgbox = layout.box()
     mgr = mgbox.row(align=True)
     mgr.prop(vfx, "m_grade_enable", text="")
-    mgr.label(text="MASTER GRADE", icon='COLOR')
+    mgr.label(text="ОБЩИЙ ЦВЕТОКОР (Master Grade)", icon='COLOR')
     if vfx.m_grade_enable:
         mgc = mgbox.column(align=True)
-        mgc.prop(vfx, "m_exposure")
-        mgc.prop(vfx, "m_temp")
-        mgc.prop(vfx, "m_tint")
-        mgc.prop(vfx, "m_saturation")
-        mgc.prop(vfx, "m_contrast")
+        if getattr(vfx, "show_hints", False):
+            mgc.label(text="Финальная общая цветокоррекция поверх всего собранного кадра", icon='HELP')
+        mgc.prop(vfx, "m_exposure", text="Экспозиция")
+        mgc.prop(vfx, "m_temp", text="Температура")
+        mgc.prop(vfx, "m_tint", text="Тинт")
+        mgc.prop(vfx, "m_saturation", text="Насыщенность")
+        mgc.prop(vfx, "m_contrast", text="Контраст")
         row_lgg = mgc.row(align=True)
-        row_lgg.prop(vfx, "m_lift", text="Lift")
-        row_lgg.prop(vfx, "m_gain", text="Gain")
+        row_lgg.prop(vfx, "m_lift", text="Lift (Тени)")
+        row_lgg.prop(vfx, "m_gain", text="Gain (Света)")
         row_btn = mgbox.row(align=True)
-        row_btn.operator("vfx.reset_master_grade", icon='LOOP_BACK')
-        row_btn.operator("vfx.copy_master_grade", icon='COPYDOWN')
+        row_btn.operator("vfx.reset_master_grade", text="Сбросить", icon='LOOP_BACK')
+        row_btn.operator("vfx.copy_master_grade", text="Скопировать на слои", icon='COPYDOWN')
         _draw_crypto_influence(context, mgc, vfx, "crypto_on_grade")
         _draw_mask_section(context, mgc, vfx, "grade", ('ALPHA', 'DEPTH', 'LUMA', 'EXT'))
 
@@ -426,6 +529,15 @@ def _draw_advanced_features(context, layout):
         box.operator("vfx.setup_light_groups", icon='LIGHT')
         box.label(text="Auto-assigns Key/Fill/Rim/Env", icon='INFO')
 
+    # Quick export shortcut
+    layout.separator()
+    pe_box = layout.box()
+    pe_row = pe_box.row(align=True)
+    pe_row.scale_y = 1.3
+    op_v = pe_row.operator("vfx.export_final_video", text="РЕНДЕР ВИДЕО", icon='PLAY')
+    op_v.animation = True
+    pe_row.operator("vfx.open_output_folder", text="", icon='FILE_FOLDER')
+
 
 def _draw_composite_order(context, layout):
     """Global composite sort mode + live display of the computed order."""
@@ -435,21 +547,23 @@ def _draw_composite_order(context, layout):
     head = cbox.row(align=True)
     head.prop(vfx, "comp_order_expanded", text="", emboss=False,
               icon='TRIA_DOWN' if vfx.comp_order_expanded else 'TRIA_RIGHT')
-    head.label(text="COMPOSITING ORDER", icon='SORTSIZE')
+    head.label(text="ПОРЯДОК НАЛОЖЕНИЯ СЛОЕВ", icon='SORTSIZE')
     head.prop(vfx, "composite_sort_mode", text="")
     if not vfx.comp_order_expanded:
         return
     seq = compute_composite_order(vfx, master, verbose=False)
     col = cbox.column(align=True)
-    col.label(text="bottom -> top:", icon='TRIA_DOWN')
+    if getattr(vfx, "show_hints", False):
+        col.label(text="Порядок наложения в композиторе (снизу вверх):", icon='HELP')
+    col.label(text="снизу -> вверх:", icon='TRIA_DOWN')
     if vfx.bg_scene is not None:
-        col.label(text="  BACKGROUND", icon='WORLD')
-    for l in seq:
+        col.label(text="  1. ФОН (BACKGROUND)", icon='WORLD')
+    for idx, l in enumerate(seq, start=2 if vfx.bg_scene else 1):
         d = _camera_distance(master, l)
-        suffix = f"  ({d:.1f}m)" if (d is not None and vfx.composite_sort_mode == 'AUTO') else ""
-        col.label(text=f"  {l.layer_name}{suffix}", icon='SCENE_DATA')
+        suffix = f"  ({d:.1f}м)" if (d is not None and vfx.composite_sort_mode == 'AUTO') else ""
+        col.label(text=f"  {idx}. {l.layer_name}{suffix}", icon='SCENE_DATA')
     if vfx.composite_sort_mode == 'AUTO':
-        col.label(text="nearest = on top", icon='INFO')
+        col.label(text="ближайшие объекты сверху", icon='INFO')
 
 
 def _draw_render_settings(context, layout):
@@ -457,39 +571,98 @@ def _draw_render_settings(context, layout):
     vfx, master = get_project(context, allow_write=False)
 
     layout.separator()
-    layout.prop(vfx, "output_dir", text="Output")
+
+    layout.prop(vfx, "resume_render", icon='RECOVER_LAST')
 
     layout.operator(
         "vfx.one_click_exr",
-        text="1-Click: Render EXR + Comp",
+        text="1-Клик: Рендер ВСЕХ слоев + Композ",
         icon='FILE_IMAGE'
     )
 
     row = layout.row(align=True)
     row.operator(
         "vfx.one_click_exr_single",
-        text="1-Click: Render Selected Layer EXR + Comp",
+        text="1-Клик: ВЫБРАННЫЕ слои",
         icon='IMAGE_ZDEPTH'
+    )
+    row.operator(
+        "vfx.render_fog_map",
+        text="Рендер Mist (EEVEE)",
+        icon='FORCE_WIND'
     )
 
     if vfx.render_running:
         bar = layout.column(align=True)
-        bar.scale_y = 2.5
+        bar.scale_y = 2.0
         bar.prop(vfx, "render_progress", slider=True, text="")
         layout.label(text=vfx.render_status, icon='RENDER_ANIMATION')
-        layout.label(text="ESC - stop render", icon='INFO')
+        layout.operator("vfx.stop_render", text="ОСТАНОВИТЬ РЕНДЕР", icon='CANCEL')
 
     _draw_composite_order(context, layout)
 
-    layout.separator(factor=1.5)
+    # Action buttons: Rebuild, Viewport, Diagnostic
+    act_row = layout.row(align=True)
+    act_row.operator("vfx.viewport_render" if False else "vfx.toggle_viewport_compositor", text="Композ во вьюпорте", icon='HIDE_OFF')
+    act_row.operator("vfx.rebuild_comp", text="Пересобрать композ", icon='FILE_REFRESH')
+    act_row.operator("vfx.diagnostic", text="", icon='CONSOLE')
 
-    row = layout.row(align=True)
-    row.prop(vfx, "objects_engine", text="Obj")
-    row.prop(vfx, "shadows_engine", text="Shd")
+    # Collapsible Render Settings & Output
+    set_box = layout.box()
+    set_head = set_box.row(align=True)
+    set_head.prop(vfx, "render_settings_expanded", text="",
+                  icon='TRIA_DOWN' if vfx.render_settings_expanded else 'TRIA_RIGHT', emboss=False)
+    set_head.label(text="НАСТРОЙКИ РЕНДЕРА И ПАПКА", icon='PREFERENCES')
 
-    row = layout.row(align=True)
-    row.operator("vfx.rebuild_comp", text="Rebuild Comp", icon='FILE_REFRESH')
-    row.operator("vfx.diagnostic", text="Diagnostic", icon='CONSOLE')
+    if vfx.render_settings_expanded:
+        set_col = set_box.column(align=True)
+        if getattr(vfx, "show_hints", False):
+            set_col.label(text="Выбор движков рендера отдельно для объектов и теней:", icon='HELP')
+        set_col.prop(vfx, "output_dir", text="Папка")
+        fmt_row = set_col.row(align=True)
+        fmt_row.prop(vfx, "render_format", text="Слои")
+        fmt_row.prop(vfx, "fog_map_format", text="Mist")
+        eng_row = set_col.row(align=True)
+        eng_row.prop(vfx, "objects_engine", text="Объекты")
+        eng_row.prop(vfx, "shadows_engine", text="Тени")
+
+        set_col.separator()
+        p_row = set_col.row(align=True)
+        p_row.prop(vfx, "use_parallel_render", icon='RESTRICT_RENDER_OFF')
+        if vfx.use_parallel_render:
+            p_row.prop(vfx, "parallel_instances", text="Потоков")
+
+    # Collapsible Final Export (Video / Animation)
+    exp_box = layout.box()
+    exp_head = exp_box.row(align=True)
+    exp_head.prop(vfx, "final_export_expanded", text="",
+                  icon='TRIA_DOWN' if vfx.final_export_expanded else 'TRIA_RIGHT', emboss=False)
+    exp_head.label(text="ФИНАЛЬНЫЙ ЭКСПОРТ (ВИДЕО)", icon='RENDER_ANIMATION')
+
+    if vfx.final_export_expanded:
+        exp_col = exp_box.column(align=True)
+        if getattr(vfx, "show_hints", False):
+            exp_col.label(text="Быстрая сборка итогового видео из композитора со всеми эффектами:", icon='HELP')
+        exp_col.prop(vfx, "final_output_path", text="Куда")
+        row_fmt = exp_col.row(align=True)
+        row_fmt.prop(vfx, "final_format", text="Формат")
+        if vfx.final_format in ('MP4', 'PRORES'):
+            row_fmt.prop(vfx, "final_quality", text="Качество")
+
+        exp_col.separator()
+        row_turbo = exp_col.row(align=True)
+        row_turbo.prop(vfx, "final_speedup", text="Турбо-сборка (Workbench)", icon='FORWARD')
+        if vfx.final_speedup and getattr(vfx, "show_hints", False):
+            exp_col.label(text="0.1-0.2 сек/кадр: читает готовые EXR слои без 3D-трассировки Cycles", icon='INFO')
+
+        exp_col.separator()
+        btn_anim = exp_col.operator("vfx.export_final_video", text="РЕНДЕР ВИДЕО (АНИМАЦИЯ)", icon='PLAY')
+        btn_anim.animation = True
+
+        sub_row = exp_col.row(align=True)
+        btn_still = sub_row.operator("vfx.export_final_video", text="Текущий кадр", icon='IMAGE_DATA')
+        btn_still.animation = False
+        sub_row.operator("vfx.open_output_folder", text="Открыть папку", icon='FILE_FOLDER')
 
 
 # ---------------------------------------------------------------------
@@ -511,7 +684,9 @@ class VFX_PT_main(bpy.types.Panel):
 
         try:
             vfx, master = get_project(context, allow_write=False)
-            layout.label(text=f"VFX Layer Tools build {VFX_VERSION}", icon='NODETREE')
+            top_row = layout.row(align=True)
+            top_row.label(text=f"VFX Layer Tools v{VFX_VERSION}", icon='NODETREE')
+            top_row.prop(vfx, "show_hints", text="Подсказки", icon='HELP', toggle=True)
             layout.separator()
             layout.prop(vfx, "master_scene", text="Master")
 

@@ -245,6 +245,10 @@ def sync_scene_settings(master, scene):
         scene.use_nodes = False
     except Exception:
         pass
+    try:
+        scene.render.use_persistent_data = getattr(master.render, 'use_persistent_data', True)
+    except Exception:
+        pass
     for vl in scene.view_layers:
         try:
             vl.use_pass_mist = True

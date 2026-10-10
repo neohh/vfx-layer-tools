@@ -3,6 +3,13 @@
 import bpy
 import traceback
 
+def _log(msg):
+    pass
+
+
+def _lerp(a, b, t):
+    return a + (b - a) * t
+
 
 # ---------------------------------------------------------------------
 # NEUTRAL values (passthrough)
@@ -150,6 +157,7 @@ def get_or_create_color_match_group():
     gout = ng.nodes.new("NodeGroupOutput")
     gout.location = (450, 0)
     img_in = gin.outputs.get("Image")
+    str_in = gin.outputs.get("Strength")
     img_out = gout.inputs.get("Image")
     link_count = 0
 
