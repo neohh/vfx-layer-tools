@@ -43,25 +43,75 @@ def _get_rendered_frames_badge(scene, vfx, master, is_static=False):
 
 
 # ---------------------------------------------------------------------
-# UI LIST (Compatibility stub)
+# UI LIST
 # ---------------------------------------------------------------------
 
 class VFX_UL_layers(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        has_shd = bool(item.shadow_scene)
         vfx = context.scene.vfx
         master = getattr(vfx, "master_scene", None) or context.scene
+
         row = layout.row(align=True)
+        # 1. Multi-selection checkbox
         row.prop(item, "selected", text="")
+
+        # 2. Expand arrow: toggles shadow sub-item underneath
+        if has_shd:
+            tog = row.operator(
+                "vfx.toggle_layer_expand",
+                text="",
+                icon='TRIA_DOWN' if item.expanded else 'TRIA_RIGHT',
+                emboss=False
+            )
+            tog.index = index
+        else:
+            row.label(text="", icon='BLANK1')
+
+        # 3. Layer Name (plain label, NO button plates)
         row.label(text=item.layer_name, icon='SCENE_DATA' if item.scene else 'ERROR')
+
+        # 4. Right cluster
         right = row.row(align=True)
         right.alignment = 'RIGHT'
+
         if getattr(item, "use_holdout_matte", False):
             right.label(text="", icon='MOD_MASK')
-        if bool(item.shadow_scene):
+
+        if has_shd:
             right.label(text="", icon='LIGHT')
+
         b_text, b_icon = _get_rendered_frames_badge(item.scene, vfx, master, is_static=item.is_static)
         if b_text:
             right.label(text=b_text, icon=b_icon)
+
+        # Arrow button to select layer objects in 3D Viewport
+        sel_btn = right.operator(
+            "vfx.select_layer_objects",
+            text="",
+            icon='RESTRICT_SELECT_OFF',
+            emboss=False
+        )
+        sel_btn.layer_index = index
+
+        # Render 1 layer button
+        rr = right.operator(
+            "vfx.render_all_layers",
+            text="",
+            icon='RENDER_STILL',
+            emboss=False
+        )
+        rr.only_layer = index
+        rr.refresh_after = True
+
+        # Drag grip
+        drag = right.operator(
+            "vfx.drag_layer",
+            text="",
+            icon='GRIP',
+            emboss=False
+        )
+        drag.index = index
 
 
 # ---------------------------------------------------------------------
@@ -69,7 +119,7 @@ class VFX_UL_layers(bpy.types.UIList):
 # ---------------------------------------------------------------------
 
 def _draw_layer_list(context, layout):
-    """Draw hierarchical layer tree + active layer card."""
+    """Draw layer list + active layer card."""
     vfx, master = get_project(context, allow_write=False)
 
     layout.operator_context = 'INVOKE_DEFAULT'
@@ -81,96 +131,41 @@ def _draw_layer_list(context, layout):
     top_row.operator("vfx.assign_layer_mask_dialog", text=tr("Matte", context), icon='MOD_MASK')
     layout.operator("vfx.add_selected_lights", text=tr("Link Selected Lights", context), icon='LIGHT')
 
-    # ── HIERARCHICAL LAYER TREE (Shadow expands DOWNWARDS as sub-item) ──
-    if not vfx.layers:
-        empty_box = layout.box()
-        empty_box.label(text=tr("No layers yet. Click '+ Layer' to create one.", context), icon='INFO')
-    else:
-        tree_box = layout.box()
-        for idx, layer in enumerate(vfx.layers):
-            is_active = (idx == vfx.active_layer_index)
-            has_shd = bool(layer.shadow_scene)
+    # Fixed-height native Blender layer list widget
+    layout.template_list(
+        "VFX_UL_layers",
+        "",
+        vfx,
+        "layers",
+        vfx,
+        "active_layer_index",
+        rows=4
+    )
 
-            # Main Layer Row
-            l_row = tree_box.row(align=True)
+    # ── SUB-ITEM: If any layer has shadow expanded, show it DOWNWARDS as a clean sub-box below the list ──
+    for idx, lyr in enumerate(vfx.layers):
+        if lyr.shadow_scene and lyr.expanded:
+            sbox = layout.box()
+            sbox.scale_y = 0.95
+            sr = sbox.row(align=True)
+            sr.label(text="", icon='FORWARD')
+            sr.label(text=f"{tr('3D SHADOW', context)} ({lyr.layer_name})", icon='LIGHT')
 
-            # 1. Selection checkbox (no eye icon)
-            l_row.prop(layer, "selected", text="")
+            s_right = sr.row(align=True)
+            s_right.alignment = 'RIGHT'
 
-            # 2. Expand arrow: toggles shadow sub-item underneath
-            if has_shd:
-                tog = l_row.operator(
-                    "vfx.toggle_layer_expand",
-                    text="",
-                    icon='TRIA_DOWN' if layer.expanded else 'TRIA_RIGHT',
-                    emboss=False
-                )
-                tog.index = idx
-            else:
-                l_row.label(text="", icon='BLANK1')
+            shd_text, shd_icon = _get_rendered_frames_badge(lyr.shadow_scene, vfx, master)
+            if shd_text:
+                s_right.label(text=shd_text, icon=shd_icon)
 
-            # 3. Layer Name button (click to select as active)
-            btn = l_row.operator(
-                "vfx.set_active_layer",
-                text=layer.layer_name,
-                icon='SCENE_DATA' if layer.scene else 'ERROR',
-                depress=is_active
-            )
-            btn.layer_index = idx
-
-            # 4. Right cluster: Matte badge, Frame count badge, Render button
-            r_sub = l_row.row(align=True)
-            r_sub.alignment = 'RIGHT'
-
-            if getattr(layer, "use_holdout_matte", False):
-                r_sub.label(text="", icon='MOD_MASK')
-
-            b_text, b_icon = _get_rendered_frames_badge(layer.scene, vfx, master, is_static=layer.is_static)
-            if b_text:
-                r_sub.label(text=b_text, icon=b_icon)
-
-            rr = r_sub.operator(
+            rr2 = s_right.operator(
                 "vfx.render_all_layers",
                 text="",
                 icon='RENDER_STILL',
                 emboss=False
             )
-            rr.only_layer = idx
-            rr.refresh_after = True
-
-            # 5. SUB-ITEM ROW: Extends DOWNWARDS underneath layer, never overlaps!
-            if has_shd and layer.expanded:
-                shd_row = tree_box.row(align=True)
-                shd_row.scale_y = 0.95
-
-                # Indentation for nested sub-item
-                shd_row.label(text="", icon='BLANK1')
-                shd_row.label(text="", icon='BLANK1')
-
-                # Shadow Sub-Item button
-                shd_btn = shd_row.operator(
-                    "vfx.set_active_layer",
-                    text=f"{tr('3D SHADOW', context)} ({layer.layer_name})",
-                    icon='LIGHT',
-                    depress=is_active
-                )
-                shd_btn.layer_index = idx
-
-                s_right = shd_row.row(align=True)
-                s_right.alignment = 'RIGHT'
-
-                shd_text, shd_icon = _get_rendered_frames_badge(layer.shadow_scene, vfx, master)
-                if shd_text:
-                    s_right.label(text=shd_text, icon=shd_icon)
-
-                rr2 = s_right.operator(
-                    "vfx.render_all_layers",
-                    text="",
-                    icon='RENDER_STILL',
-                    emboss=False
-                )
-                rr2.only_shadow_for_layer = idx
-                rr2.refresh_after = True
+            rr2.only_shadow_for_layer = idx
+            rr2.refresh_after = True
 
     # Reorder buttons: Up (Closer) | Down (Further)
     row = layout.row(align=True)
