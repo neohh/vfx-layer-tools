@@ -2593,3 +2593,18 @@ class VFX_OT_select_override_layer(bpy.types.Operator):
             vfx.fx_override_layer_idx = self.layer_index
         return {'FINISHED'}
 
+
+class VFX_OT_set_active_layer(bpy.types.Operator):
+    bl_idname = "vfx.set_active_layer"
+    bl_label = "Set Active Layer"
+    bl_description = "Select this layer as active"
+
+    layer_index: IntProperty(default=0)
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=False)
+        if vfx and 0 <= self.layer_index < len(vfx.layers):
+            vfx.active_layer_index = self.layer_index
+        return {'FINISHED'}
+
+

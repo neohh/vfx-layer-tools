@@ -1238,6 +1238,7 @@ from .operators import (
     VFX_OT_add_background, VFX_OT_browse_bg_file,
     VFX_OT_match_scene_fps, VFX_OT_match_frame_start,
     VFX_OT_select_override_layer,
+    VFX_OT_set_active_layer,
 )
 from .ui import (
     VFX_UL_layers, VFX_PT_main, VFX_PT_post_effects,
@@ -1310,6 +1311,7 @@ classes = (
     VFX_OT_match_scene_fps,
     VFX_OT_match_frame_start,
     VFX_OT_select_override_layer,
+    VFX_OT_set_active_layer,
     VFX_PT_main,
     VFX_PT_post_effects,
     VFX_PT_compositor,
