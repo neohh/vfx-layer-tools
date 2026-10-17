@@ -489,8 +489,7 @@ def _draw_render_settings(context, layout):
     row_sub = col_rnd.row(align=True)
     row_sub.scale_y = 0.8
     row_sub.prop(vfx, "resume_render", text=tr("Resume", context), toggle=True)
-    op_sel = row_sub.operator("vfx.one_click_exr_single", text=tr("Selected", context), icon='RESTRICT_SELECT_OFF')
-    op_sel.only_selected = True
+    row_sub.operator("vfx.one_click_exr_single", text=tr("Selected", context), icon='RESTRICT_SELECT_OFF')
     row_sub.operator("vfx.render_fog_map", text=tr("Mist Pass", context), icon='FORCE_WIND')
 
     if vfx.render_running:

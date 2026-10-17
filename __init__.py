@@ -575,7 +575,7 @@ class VFXProject(bpy.types.PropertyGroup):
     post_fx_expanded: BoolProperty(
         name="Post Effects Expanded",
         description="Expand Post Effects section / Развернуть блок пост-эффектов",
-        default=False
+        default=True
     )
     fx_target_mode: EnumProperty(
         name="FX Target",
