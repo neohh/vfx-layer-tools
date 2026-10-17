@@ -1,14 +1,14 @@
-﻿bl_info = {
+bl_info = {
     "name": "VFX Layer Tools",
     "author": "VFX Pipeline",
-    "version": (3, 22, 0),
+    "version": (3, 23, 0),
     "blender": (5, 2, 1),
     "location": "View3D > Sidebar > VFX",
     "description": "VFX layer / scene / compositing manager",
     "category": "Compositing",
 }
 
-VFX_VERSION = "3.22.0"
+VFX_VERSION = "3.23.0"
 
 import bpy
 import importlib
@@ -562,6 +562,34 @@ class VFXProject(bpy.types.PropertyGroup):
         name="Render Settings Expanded",
         description="Show engines and output directory settings",
         default=False
+    )
+    vfx_ui_lang: EnumProperty(
+        name="Language",
+        description="Select UI language / Выберите язык интерфейса",
+        items=(
+            ('RU', "Русский", "Русский интерфейс"),
+            ('EN', "English", "English interface"),
+        ),
+        default='RU'
+    )
+    post_fx_expanded: BoolProperty(
+        name="Post Effects Expanded",
+        description="Expand Post Effects section / Развернуть блок пост-эффектов",
+        default=False
+    )
+    fx_target_mode: EnumProperty(
+        name="FX Target",
+        description="Apply effects globally to all layers or fine-tune specific layer override",
+        items=(
+            ('ALL', "Все слои (Master)", "Global post effects for entire composite"),
+            ('LAYER', "Оверрайд слоя", "Per-layer fine-tuning overrides"),
+        ),
+        default='ALL'
+    )
+    fx_override_layer_idx: IntProperty(
+        name="Override Layer Index",
+        description="Index of layer to override",
+        default=0
     )
     use_parallel_render: BoolProperty(
         name="Параллельный рендер",
@@ -1209,6 +1237,7 @@ from .operators import (
     VFX_OT_open_layer_matte_folder, VFX_OT_assign_layer_mask_dialog,
     VFX_OT_add_background, VFX_OT_browse_bg_file,
     VFX_OT_match_scene_fps, VFX_OT_match_frame_start,
+    VFX_OT_select_override_layer,
 )
 from .ui import (
     VFX_UL_layers, VFX_PT_main, VFX_PT_post_effects,
@@ -1280,6 +1309,7 @@ classes = (
     VFX_OT_browse_bg_file,
     VFX_OT_match_scene_fps,
     VFX_OT_match_frame_start,
+    VFX_OT_select_override_layer,
     VFX_PT_main,
     VFX_PT_post_effects,
     VFX_PT_compositor,

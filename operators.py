@@ -2577,3 +2577,19 @@ class VFX_OT_assign_layer_mask_dialog(bpy.types.Operator):
         _trigger_comp(context)
         self.report({'INFO'}, f"Маска успешно применена к слою '{layer.layer_name}'")
         return {'FINISHED'}
+
+
+class VFX_OT_select_override_layer(bpy.types.Operator):
+    bl_idname = "vfx.select_override_layer"
+    bl_label = "Select Override Layer"
+    bl_description = "Switch active layer for per-layer FX overrides"
+
+    layer_index: IntProperty(default=0)
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=False)
+        if vfx and 0 <= self.layer_index < len(vfx.layers):
+            vfx.active_layer_index = self.layer_index
+            vfx.fx_override_layer_idx = self.layer_index
+        return {'FINISHED'}
+
