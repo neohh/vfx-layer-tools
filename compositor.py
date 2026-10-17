@@ -2,6 +2,7 @@
 
 import bpy
 import os
+import re
 
 from .core import (
     ensure_root, ensure_camera_collection, link_collection_to_scene,
@@ -103,10 +104,6 @@ def get_comp_tree(master, create=True):
 # COMP FROM FILES
 # ---------------------------------------------------------------------
 
-def _load_sequence_image(scene_name, base_path):
-    """Fallback: load EXR sequence via image.load + SEQUENCE source."""
-    img_name = f"VFX_SEQ_{scene_name}"
-    abs_base = bpy.path.abspath(base_path)
 def _get_folder_sequence_files(folder):
     """Find image sequence files in folder, grouped by extension.
     Never mixes extensions. Selects the extension with the largest number of frames.
@@ -116,6 +113,9 @@ def _get_folder_sequence_files(folder):
         return [], "", 1
     by_ext = {}
     for f in os.listdir(folder):
+        p = os.path.join(folder, f)
+        if not os.path.isfile(p):
+            continue
         ext = os.path.splitext(f)[1].lower()
         if ext in ('.exr', '.png', '.tif', '.tiff'):
             by_ext.setdefault(ext, []).append(f)
@@ -126,10 +126,11 @@ def _get_folder_sequence_files(folder):
     files = sorted(by_ext[best_ext])
     start_frame = 1
     if files:
-        digits = "".join(ch for ch in files[0] if ch.isdigit())
-        if digits:
+        base = os.path.splitext(files[0])[0]
+        matches = re.findall(r'\d+', base)
+        if matches:
             try:
-                start_frame = int(digits)
+                start_frame = int(matches[-1])
             except Exception:
                 pass
     return files, best_ext, start_frame
@@ -261,7 +262,7 @@ def _load_sequence_image2(scene_name, base_path):
     return img
 
 
-def _configure_image_node_sequence(node, img, is_static=False):
+def _configure_image_node_sequence(node, img, is_static=False, frame_start=None, frame_offset=None):
     """Configure CompositorNodeImage to correctly play an image sequence or hold a single frame."""
     if node is None or img is None:
         return
@@ -288,6 +289,27 @@ def _configure_image_node_sequence(node, img, is_static=False):
     if st is None:
         st = getattr(img, "frame_start", 1)
 
+    # Sanitize st (guard against overflow or corrupted digits like 83310000)
+    try:
+        st = int(st)
+        if st > 100000 or st < -10000:
+            st = 1
+    except Exception:
+        st = 1
+
+    if frame_start is not None:
+        try:
+            st = int(frame_start)
+        except Exception:
+            pass
+
+    foff = 0
+    if frame_offset is not None:
+        try:
+            foff = int(frame_offset)
+        except Exception:
+            foff = 0
+
     try:
         img.source = 'SEQUENCE'
     except Exception:
@@ -305,7 +327,7 @@ def _configure_image_node_sequence(node, img, is_static=False):
         except Exception:
             pass
         try:
-            target.frame_offset = 0
+            target.frame_offset = foff
         except Exception:
             pass
         try:
@@ -316,6 +338,902 @@ def _configure_image_node_sequence(node, img, is_static=False):
             target.use_auto_refresh = True
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------
+# EXTERNAL HOLDOUT MATTE SEQUENCE (LAYER CUTOUT)
+# ---------------------------------------------------------------------
+
+def get_matte_sequence_info(folder_or_path):
+    """Return (files_count, start_frame, first_file_name, status_str)"""
+    if not folder_or_path:
+        return 0, 1, "", "Папка не указана"
+    try:
+        abs_path = bpy.path.abspath(folder_or_path)
+    except Exception:
+        abs_path = folder_or_path
+
+    if os.path.isfile(abs_path):
+        folder = os.path.dirname(abs_path)
+    elif os.path.isdir(abs_path):
+        folder = abs_path
+    else:
+        return 0, 1, "", "Папка не существует"
+
+    files, ext, start_f = _get_folder_sequence_files(folder)
+    if not files:
+        return 0, 1, "", "PNG файлы не найдены"
+    return len(files), start_f, files[0], f"Найдено: {len(files)} кадров ({ext})"
+
+
+def load_matte_sequence_image(folder_or_path, name_prefix="VFX_MATTE"):
+    """Load an image sequence from an arbitrary folder or file path.
+    Returns (bpy.types.Image or None, files_count, start_frame).
+    """
+    if not folder_or_path:
+        return None, 0, 1
+
+    try:
+        abs_path = bpy.path.abspath(folder_or_path)
+    except Exception:
+        abs_path = folder_or_path
+
+    if os.path.isfile(abs_path):
+        folder = os.path.dirname(abs_path)
+    elif os.path.isdir(abs_path):
+        folder = abs_path
+    else:
+        folder = abs_path
+        if not os.path.exists(folder):
+            return None, 0, 1
+
+    files, ext, start_frame = _get_folder_sequence_files(folder)
+    if not files:
+        return None, 0, 1
+
+    try:
+        start_frame = int(start_frame)
+        if start_frame > 100000 or start_frame < -10000:
+            start_frame = 1
+    except Exception:
+        start_frame = 1
+
+    img_name = f"{name_prefix}"
+
+    # Check existing image datablock
+    existing = bpy.data.images.get(img_name)
+    if existing is not None:
+        try:
+            ex_path = bpy.path.abspath(existing.filepath)
+            ex_dir = os.path.dirname(ex_path) if os.path.isfile(ex_path) else ex_path
+            if os.path.normcase(os.path.normpath(ex_dir)) == os.path.normcase(os.path.normpath(folder)):
+                first_file = os.path.join(folder, files[0])
+                existing.filepath = first_file
+                existing.filepath_raw = first_file
+                existing.source = 'SEQUENCE'
+                existing.reload()
+                existing["vfx_files_count"] = len(files)
+                existing["vfx_start_frame"] = start_frame
+                return existing, len(files), start_frame
+        except Exception:
+            pass
+        try:
+            bpy.data.images.remove(existing)
+        except Exception:
+            pass
+
+    # Open sequence via ops.image.open or load
+    win = None
+    if bpy.context.window_manager and bpy.context.window_manager.windows:
+        win = bpy.context.window_manager.windows[0]
+
+    img = None
+    before = set(bpy.data.images.keys())
+    try:
+        with bpy.context.temp_override(window=win):
+            bpy.ops.image.open(
+                directory=folder + os.sep,
+                files=[{"name": f} for f in files],
+                check_existing=False,
+                relative_path=False,
+            )
+        new_imgs = [bpy.data.images[k] for k in (set(bpy.data.images.keys()) - before)]
+        if new_imgs:
+            img = new_imgs[0]
+    except Exception as e:
+        print(f"VFX: matte ops open failed: {e}")
+
+    if img is None:
+        first_file = os.path.join(folder, files[0])
+        try:
+            img = bpy.data.images.load(first_file, check_existing=False)
+        except Exception as e:
+            print(f"VFX: matte load failed: {e}")
+            return None, 0, 1
+
+    img.name = img_name
+    img.source = 'SEQUENCE'
+    try:
+        img.frame_start = start_frame
+        img.frame_offset = 0
+        img.frame_duration = len(files)
+        img["vfx_files_count"] = len(files)
+        img["vfx_start_frame"] = start_frame
+        img.reload()
+    except Exception:
+        pass
+
+    return img, len(files), start_frame
+
+
+def cleanup_layer_matte_nodes(nt, layer_id):
+    """Remove any holdout matte nodes for the given layer ID."""
+    for name in (
+        f"VFX_MATTE_IMG_{layer_id}",
+        f"VFX_MATTE_SCALE_{layer_id}",
+        f"VFX_MATTE_BW_{layer_id}",
+        f"VFX_MATTE_SEP_{layer_id}",
+        f"VFX_MATTE_CHOKE_{layer_id}",
+        f"VFX_MATTE_FEATHER_{layer_id}",
+        f"VFX_MATTE_INV_{layer_id}",
+        f"VFX_MATTE_SEP_LAYER_{layer_id}",
+        f"VFX_MATTE_MUL_A_{layer_id}",
+        f"VFX_MATTE_MUL_RGB_{layer_id}",
+        f"VFX_MATTE_SA_{layer_id}",
+        f"VFX_MATTE_INV_SHD_{layer_id}",
+        f"VFX_MATTE_SEP_LAYER_SHD_{layer_id}",
+        f"VFX_MATTE_MUL_A_SHD_{layer_id}",
+        f"VFX_MATTE_MUL_RGB_SHD_{layer_id}",
+        f"VFX_MATTE_SA_SHD_{layer_id}",
+    ):
+        n = nt.nodes.get(name)
+        if n:
+            nt.nodes.remove(n)
+
+
+def cleanup_shadow_filter_nodes(nt, layer_id):
+    """Remove shadow filter nodes for the given layer ID."""
+    if nt is None:
+        return
+    for name in (f"VFX_SHD_RAMP_{layer_id}", f"VFX_SHD_BLUR_{layer_id}"):
+        n = nt.nodes.get(name)
+        if n:
+            try:
+                nt.nodes.remove(n)
+            except Exception:
+                pass
+
+
+def apply_shadow_filter(nt, layer, sh_node, loc_x=550, loc_y=0):
+    """Filter and shape the layer shadow with ColorRamp and optional blur.
+    Returns the processed output socket (NodeSocketColor / RGBA).
+    """
+    if nt is None or sh_node is None:
+        return None
+
+    alpha_sock = sh_node.outputs.get("Alpha")
+    img_sock = sh_node.outputs.get("Image")
+    fac_sock = alpha_sock if alpha_sock is not None else img_sock
+    base_sock = img_sock if img_sock is not None else alpha_sock
+
+    use_ramp = getattr(layer, "shadow_use_ramp", True)
+    ramp_node_name = f"VFX_SHD_RAMP_{layer.id}"
+    blur_node_name = f"VFX_SHD_BLUR_{layer.id}"
+
+    current_sock = base_sock
+
+    if use_ramp and fac_sock is not None:
+        ramp = nt.nodes.get(ramp_node_name)
+        if ramp is not None and ramp.type != 'VALTORGB':
+            try:
+                nt.nodes.remove(ramp)
+            except Exception:
+                pass
+            ramp = None
+        if ramp is None:
+            try:
+                ramp = nt.nodes.new("ShaderNodeValToRGB")
+                ramp.name = ramp_node_name
+            except Exception:
+                ramp = None
+
+        if ramp is not None:
+            ramp.label = f"{layer.layer_name} SHD Ramp"
+            ramp.location = (loc_x, loc_y)
+
+            col = getattr(layer, "shadow_color", (0.0, 0.0, 0.0, 1.0))
+            r, g, b = float(col[0]), float(col[1]), float(col[2])
+            a = float(col[3]) if len(col) > 3 else 1.0
+
+            pos_black = max(0.0, min(0.99, float(getattr(layer, "shadow_ramp_black", 0.0))))
+            pos_white = max(pos_black + 0.005, min(1.0, float(getattr(layer, "shadow_ramp_white", 1.0))))
+
+            try:
+                cr = ramp.color_ramp
+                if len(cr.elements) >= 2:
+                    e0 = cr.elements[0]
+                    e1 = cr.elements[-1]
+                    e0.position = pos_black
+                    e0.color = (r, g, b, 0.0)
+                    e1.position = pos_white
+                    e1.color = (r, g, b, a)
+            except Exception as e:
+                print(f"VFX: error configuring shadow ramp: {e}")
+
+            fac_in = ramp.inputs.get("Fac")
+            if fac_in is not None:
+                if not any(link.from_socket == fac_sock for link in fac_in.links):
+                    for l in list(fac_in.links):
+                        nt.links.remove(l)
+                    nt.links.new(fac_sock, fac_in)
+
+            current_sock = ramp.outputs.get("Color") or ramp.outputs[0]
+    else:
+        old_ramp = nt.nodes.get(ramp_node_name)
+        if old_ramp is not None:
+            try:
+                nt.nodes.remove(old_ramp)
+            except Exception:
+                pass
+
+    b_px = int(getattr(layer, "shadow_blur", 0))
+    if b_px > 0 and current_sock is not None:
+        blur = nt.nodes.get(blur_node_name)
+        if blur is not None and blur.type != 'BLUR':
+            try:
+                nt.nodes.remove(blur)
+            except Exception:
+                pass
+            blur = None
+        if blur is None:
+            try:
+                blur = nt.nodes.new("CompositorNodeBlur")
+                blur.name = blur_node_name
+            except Exception:
+                blur = None
+        if blur is not None:
+            blur.label = f"{layer.layer_name} SHD Blur"
+            blur.location = (loc_x + 280, loc_y)
+            _setup_blur_node(blur, b_px, b_px)
+
+            bin_img = blur.inputs.get("Image") or blur.inputs[0]
+            if not any(link.from_socket == current_sock for link in bin_img.links):
+                for l in list(bin_img.links):
+                    nt.links.remove(l)
+                nt.links.new(current_sock, bin_img)
+
+            current_sock = blur.outputs.get("Image") or blur.outputs[0]
+    else:
+        old_blur = nt.nodes.get(blur_node_name)
+        if old_blur is not None:
+            try:
+                nt.nodes.remove(old_blur)
+            except Exception:
+                pass
+
+    return current_sock
+
+
+def _setup_dilate_erode_node(node, distance=0, mode='Distance'):
+    """Configure CompositorNodeDilateErode across Blender 4.x and 5.x."""
+    if node is None:
+        return
+    # Blender 5.x socket inputs
+    if hasattr(node, "inputs"):
+        tin = node.inputs.get("Type")
+        if tin is not None:
+            try:
+                tin.default_value = 'Distance' if mode.lower() == 'distance' else 'Steps'
+            except Exception:
+                pass
+        sin = node.inputs.get("Size")
+        if sin is not None:
+            try:
+                sin.default_value = int(distance)
+            except Exception:
+                pass
+    # Older Blender attributes
+    if hasattr(node, "mode"):
+        try:
+            node.mode = 'DISTANCE' if mode.lower() == 'distance' else 'STEP'
+        except Exception:
+            pass
+    if hasattr(node, "distance"):
+        try:
+            node.distance = int(distance)
+        except Exception:
+            pass
+
+
+def _setup_scale_node(scale_node, frame_method='STRETCH'):
+    """Safely configure CompositorNodeScale across Blender 4.x and 5.x."""
+    if scale_node is None:
+        return
+    m_val = 'Stretch'
+    if str(frame_method).upper() == 'FIT':
+        m_val = 'Fit'
+    elif str(frame_method).upper() == 'CROP':
+        m_val = 'Crop'
+
+    # Blender 5.x socket inputs
+    if hasattr(scale_node, "inputs"):
+        tin = scale_node.inputs.get("Type")
+        if tin is not None:
+            try:
+                tin.default_value = 'Render Size'
+            except Exception:
+                pass
+        ftin = scale_node.inputs.get("Frame Type")
+        if ftin is not None:
+            try:
+                ftin.default_value = m_val
+            except Exception:
+                pass
+    # Older Blender attributes
+    if hasattr(scale_node, "space"):
+        try:
+            scale_node.space = 'RENDER_SIZE'
+        except Exception:
+            pass
+    if hasattr(scale_node, "frame_method"):
+        try:
+            scale_node.frame_method = m_val.upper()
+        except Exception:
+            pass
+
+
+def _setup_blur_node(blur_node, size_x, size_y=None, filter_type='GAUSS'):
+    """Safely configure CompositorNodeBlur across Blender 4.x and 5.x."""
+    if blur_node is None:
+        return
+    sy = size_x if size_y is None else size_y
+    # Blender 5.x socket inputs
+    if hasattr(blur_node, "inputs"):
+        sin = blur_node.inputs.get("Size")
+        if sin is not None:
+            try:
+                sin.default_value = (float(size_x), float(sy))
+            except Exception:
+                try:
+                    sin.default_value = (float(size_x), float(sy), 0.0)
+                except Exception:
+                    pass
+        tin = blur_node.inputs.get("Type")
+        if tin is not None:
+            try:
+                tin.default_value = 'Gaussian'
+            except Exception:
+                pass
+    # Older Blender attributes
+    if hasattr(blur_node, "filter_type"):
+        try:
+            blur_node.filter_type = filter_type
+        except Exception:
+            pass
+    if hasattr(blur_node, "size_x"):
+        try:
+            blur_node.size_x = float(size_x)
+        except Exception:
+            pass
+    if hasattr(blur_node, "size_y"):
+        try:
+            blur_node.size_y = float(sy)
+        except Exception:
+            pass
+
+
+def _make_mix_node(nt, name, label, blend_mode='MULTIPLY', location=(0, 0)):
+    """Create a ShaderNodeMix (Blender 5+) or CompositorNodeMixRGB node safely."""
+    mix = _new_node(nt, "ShaderNodeMix", "CompositorNodeMixRGB")
+    if mix is None:
+        return None, None, None, None, None
+    mix.name = name
+    mix.label = label
+    mix.location = location
+    for attr in ("blend_type", "blend_mode"):
+        try:
+            setattr(mix, attr, blend_mode)
+            break
+        except Exception:
+            pass
+
+    if getattr(mix, "bl_idname", "") == 'ShaderNodeMix':
+        try:
+            mix.data_type = 'RGBA'
+        except Exception:
+            pass
+        fac_in = next((s for s in mix.inputs if getattr(s, "identifier", "") == "Factor_Float" or (s.type == 'VALUE' and s.name in ("Factor", "Fac"))), mix.inputs[0] if mix.inputs else None)
+        a_in = next((s for s in mix.inputs if getattr(s, "identifier", "") == "A_Color" or (s.type in ('RGBA', 'COLOR') and s.name == 'A')), None)
+        b_in = next((s for s in mix.inputs if getattr(s, "identifier", "") == "B_Color" or (s.type in ('RGBA', 'COLOR') and s.name == 'B')), None)
+        out_s = next((s for s in mix.outputs if getattr(s, "identifier", "") == "Result_Color" or (s.type in ('RGBA', 'COLOR') and s.name == 'Result')), mix.outputs[0] if mix.outputs else None)
+    else:  # CompositorNodeMixRGB
+        fac_in = mix.inputs.get("Fac") or mix.inputs.get("Factor") or (mix.inputs[0] if mix.inputs else None)
+        a_in = mix.inputs.get("Image1") or mix.inputs.get("Color1") or (mix.inputs[1] if len(mix.inputs) > 1 else None)
+        b_in = mix.inputs.get("Image2") or mix.inputs.get("Color2") or (mix.inputs[2] if len(mix.inputs) > 2 else None)
+        out_s = mix.outputs.get("Image") or (mix.outputs[0] if mix.outputs else None)
+
+    return mix, a_in, b_in, fac_in, out_s
+
+
+def apply_layer_matte(nt, layer, sock, is_shadow=False, loc_x=600, loc_y=0):
+    """Apply an external PNG image sequence matte (holdout) to a layer's image socket.
+
+    The mask cuts out (subtracts) from the layer's RGB and Alpha.
+    By default: white in mask = 3D layer is cut out (hole); black = kept.
+    If invert: white in mask = 3D layer is kept; black = cut out.
+    """
+    if not getattr(layer, "use_holdout_matte", False):
+        return sock
+
+    if is_shadow and not getattr(layer, "holdout_matte_mask_shadow", True):
+        return sock
+
+    path = getattr(layer, "holdout_matte_path", "")
+    if not path:
+        cleanup_layer_matte_nodes(nt, layer.id)
+        return sock
+
+    img, num_files, start_frame = load_matte_sequence_image(path, name_prefix=f"VFX_MATTE_SEQ_{layer.id}")
+    if img is None:
+        cleanup_layer_matte_nodes(nt, layer.id)
+        return sock
+
+    tag = f"SHD_{layer.id}" if is_shadow else layer.id
+
+    # 1. Image Sequence Node (one per layer, shared between OBJ and SHD)
+    img_node_name = f"VFX_MATTE_IMG_{layer.id}"
+    img_node = nt.nodes.get(img_node_name)
+    if img_node is not None and img_node.type != 'IMAGE':
+        nt.nodes.remove(img_node)
+        img_node = None
+    if img_node is None:
+        img_node = nt.nodes.new("CompositorNodeImage")
+        img_node.name = img_node_name
+
+    img_node.label = f"MATTE SEQ: {layer.layer_name}"
+    img_node.location = (loc_x - 650, loc_y + 150)
+    fstart = getattr(layer, "holdout_matte_frame_start", 1)
+    foffset = getattr(layer, "holdout_matte_frame_offset", 0)
+    _configure_image_node_sequence(img_node, img, is_static=False, frame_start=fstart, frame_offset=foffset)
+
+    # 2. Scale Node (Match canvas render resolution)
+    scale_node_name = f"VFX_MATTE_SCALE_{layer.id}"
+    scale_node = nt.nodes.get(scale_node_name)
+    if scale_node is None:
+        scale_node = _new_node(nt, "CompositorNodeScale")
+        if scale_node is not None:
+            scale_node.name = scale_node_name
+    if scale_node is not None:
+        scale_node.label = f"Scale Matte: {layer.layer_name}"
+        _setup_scale_node(scale_node)
+        scale_node.location = (loc_x - 520, loc_y + 150)
+        if img_node.outputs.get("Image"):
+            for l in list(scale_node.inputs[0].links):
+                nt.links.remove(l)
+            nt.links.new(img_node.outputs["Image"], scale_node.inputs[0])
+        matte_color_out = scale_node.outputs.get("Image") or img_node.outputs.get("Image")
+    else:
+        matte_color_out = img_node.outputs.get("Image")
+
+    # 3. Channel selection (Luma / Alpha)
+    mode = getattr(layer, "holdout_matte_mode", 'LUMA')
+    matte_val_sock = None
+    if mode == 'ALPHA':
+        if scale_node is not None and scale_node.outputs.get("Alpha"):
+            matte_val_sock = scale_node.outputs["Alpha"]
+        elif img_node.outputs.get("Alpha"):
+            matte_val_sock = img_node.outputs["Alpha"]
+        else:
+            sep_m_name = f"VFX_MATTE_SEP_{layer.id}"
+            sep_m = nt.nodes.get(sep_m_name)
+            if sep_m is None:
+                sep_m = _new_node(nt, "CompositorNodeSeparateColor")
+                if sep_m is not None:
+                    sep_m.name = sep_m_name
+            if sep_m is not None:
+                sep_m.location = (loc_x - 350, loc_y + 150)
+                if matte_color_out:
+                    for l in list(sep_m.inputs[0].links):
+                        nt.links.remove(l)
+                    nt.links.new(matte_color_out, sep_m.inputs[0])
+                matte_val_sock = sep_m.outputs.get("Alpha") or sep_m.outputs[-1]
+    else:  # LUMA
+        bw_name = f"VFX_MATTE_BW_{layer.id}"
+        bw_node = nt.nodes.get(bw_name)
+        if bw_node is None:
+            bw_node = _new_node(nt, "CompositorNodeRGBToBW")
+            if bw_node is not None:
+                bw_node.name = bw_name
+        if bw_node is not None:
+            bw_node.location = (loc_x - 350, loc_y + 150)
+            if matte_color_out:
+                for l in list(bw_node.inputs[0].links):
+                    nt.links.remove(l)
+                nt.links.new(matte_color_out, bw_node.inputs[0])
+            matte_val_sock = bw_node.outputs.get("Val") or bw_node.outputs[0]
+
+    if matte_val_sock is None:
+        matte_val_sock = matte_color_out
+
+    # 4. Optional Choke / Dilate / Erode (Contract / Expand mask)
+    # Negative choke (e.g. -3 px) = erode/shrink the mask inwards, closing transparent gaps around thin foreground objects (poles, wires)
+    # Positive choke (e.g. +2 px) = expand the mask outwards
+    choke = int(getattr(layer, "holdout_matte_choke", 0))
+    if choke != 0:
+        choke_name = f"VFX_MATTE_CHOKE_{layer.id}"
+        choke_node = nt.nodes.get(choke_name)
+        if choke_node is None:
+            choke_node = _new_node(nt, "CompositorNodeDilateErode")
+            if choke_node is not None:
+                choke_node.name = choke_name
+        if choke_node is not None:
+            choke_node.label = f"Matte Choke ({choke:+d}px)"
+            choke_node.location = (loc_x - 180, loc_y + 150)
+            _setup_dilate_erode_node(choke_node, distance=choke, mode='Distance')
+            min_sock = choke_node.inputs.get("Mask") or choke_node.inputs[0]
+            for l in list(min_sock.links):
+                nt.links.remove(l)
+            nt.links.new(matte_val_sock, min_sock)
+            matte_val_sock = choke_node.outputs.get("Mask") or choke_node.outputs[0]
+    else:
+        old_choke = nt.nodes.get(f"VFX_MATTE_CHOKE_{layer.id}")
+        if old_choke:
+            nt.nodes.remove(old_choke)
+
+    # 5. Optional Feather (Blur)
+    feather = float(getattr(layer, "holdout_matte_feather", 0.0))
+    if feather > 0.001:
+        blur_name = f"VFX_MATTE_FEATHER_{layer.id}"
+        blur_node = nt.nodes.get(blur_name)
+        if blur_node is None:
+            blur_node = _new_node(nt, "CompositorNodeBlur")
+            if blur_node is not None:
+                blur_node.name = blur_name
+        if blur_node is not None:
+            blur_node.label = f"Matte Feather ({feather:.0f}px)"
+            blur_node.location = (loc_x - 10, loc_y + 150)
+            _setup_blur_node(blur_node, feather, feather)
+            for l in list(blur_node.inputs[0].links):
+                nt.links.remove(l)
+            nt.links.new(matte_val_sock, blur_node.inputs[0])
+            matte_val_sock = blur_node.outputs[0]
+    else:
+        old_blur = nt.nodes.get(f"VFX_MATTE_FEATHER_{layer.id}")
+        if old_blur:
+            nt.nodes.remove(old_blur)
+
+    # 5. Inversion / Keep Factor (F)
+    # Default (invert=False): white mask = CUT OUT layer (F = 1 - mask).
+    # Invert (invert=True): white mask = KEEP layer (F = mask).
+    invert = getattr(layer, "holdout_matte_invert", False)
+    if not invert:
+        sub_name = f"VFX_MATTE_INV_{tag}"
+        sub_node = nt.nodes.get(sub_name)
+        if sub_node is None:
+            sub_node = _new_node(nt, "ShaderNodeMath", "CompositorNodeMath")
+            if sub_node is not None:
+                sub_node.name = sub_name
+        if sub_node is not None:
+            sub_node.operation = 'SUBTRACT'
+            sub_node.label = "1.0 - Matte (Cutout)"
+            sub_node.location = (loc_x - 40, loc_y + 150)
+            sub_node.inputs[0].default_value = 1.0
+            for l in list(sub_node.inputs[1].links):
+                nt.links.remove(l)
+            nt.links.new(matte_val_sock, sub_node.inputs[1])
+            fac_sock = sub_node.outputs[0]
+        else:
+            fac_sock = matte_val_sock
+    else:
+        fac_sock = matte_val_sock
+        old_sub = nt.nodes.get(f"VFX_MATTE_INV_{tag}")
+        if old_sub:
+            nt.nodes.remove(old_sub)
+
+    # 6. Apply to layer image and alpha
+    # Alpha: Layer_Alpha * F
+    sep_layer_name = f"VFX_MATTE_SEP_LAYER_{tag}"
+    sep_layer = nt.nodes.get(sep_layer_name)
+    if sep_layer is None:
+        sep_layer = _new_node(nt, "CompositorNodeSeparateColor")
+        if sep_layer is not None:
+            sep_layer.name = sep_layer_name
+    if sep_layer is not None:
+        sep_layer.location = (loc_x + 80, loc_y + 80)
+        for l in list(sep_layer.inputs[0].links):
+            nt.links.remove(l)
+        nt.links.new(sock, sep_layer.inputs[0])
+        layer_orig_alpha = sep_layer.outputs.get("Alpha") or sep_layer.outputs[-1]
+    else:
+        layer_orig_alpha = None
+
+    # Alpha multiply:
+    mul_a_name = f"VFX_MATTE_MUL_A_{tag}"
+    mul_a = nt.nodes.get(mul_a_name)
+    if mul_a is None:
+        mul_a = _new_node(nt, "ShaderNodeMath", "CompositorNodeMath")
+        if mul_a is not None:
+            mul_a.name = mul_a_name
+    if mul_a is not None:
+        mul_a.operation = 'MULTIPLY'
+        mul_a.location = (loc_x + 230, loc_y + 80)
+        if layer_orig_alpha is not None:
+            for l in list(mul_a.inputs[0].links):
+                nt.links.remove(l)
+            nt.links.new(layer_orig_alpha, mul_a.inputs[0])
+        else:
+            mul_a.inputs[0].default_value = 1.0
+        for l in list(mul_a.inputs[1].links):
+            nt.links.remove(l)
+        nt.links.new(fac_sock, mul_a.inputs[1])
+        final_alpha_sock = mul_a.outputs[0]
+    else:
+        final_alpha_sock = fac_sock
+
+    # RGB multiply: Color * F
+    mul_rgb, a_in, b_in, fac_in, out_s = _make_mix_node(
+        nt, f"VFX_MATTE_MUL_RGB_{tag}",
+        f"Matte RGB Multiply: {layer.layer_name}",
+        blend_mode='MULTIPLY',
+        location=(loc_x + 230, loc_y - 60)
+    )
+    if mul_rgb is not None:
+        if fac_in is not None:
+            fac_in.default_value = 1.0
+        if a_in is not None:
+            for l in list(a_in.links):
+                nt.links.remove(l)
+            nt.links.new(sock, a_in)
+        if b_in is not None:
+            for l in list(b_in.links):
+                nt.links.remove(l)
+            nt.links.new(fac_sock, b_in)
+        final_rgb_sock = out_s if out_s is not None else sock
+    else:
+        final_rgb_sock = sock
+
+    # Set Alpha node:
+    sa_name = f"VFX_MATTE_SA_{tag}"
+    sa = nt.nodes.get(sa_name)
+    if sa is None:
+        sa = _new_node(nt, "CompositorNodeSetAlpha")
+        if sa is not None:
+            sa.name = sa_name
+    if sa is not None:
+        sa.location = (loc_x + 390, loc_y)
+        sa.label = f"Matte Cutout: {layer.layer_name}"
+        if hasattr(sa, "mode"):
+            try:
+                sa.mode = 'REPLACE'
+            except Exception:
+                pass
+        if hasattr(sa, "inputs") and "Type" in sa.inputs:
+            try:
+                sa.inputs["Type"].default_value = 'Replace Alpha'
+            except Exception:
+                pass
+        img_in = sa.inputs.get("Image") or sa.inputs[0]
+        alpha_in = sa.inputs.get("Alpha") or sa.inputs[1]
+        for l in list(img_in.links):
+            nt.links.remove(l)
+        nt.links.new(final_rgb_sock, img_in)
+        for l in list(alpha_in.links):
+            nt.links.remove(l)
+        nt.links.new(final_alpha_sock, alpha_in)
+        return sa.outputs.get("Image") or sa.outputs[0]
+
+    return final_rgb_sock
+
+
+def _cleanup_bg_nodes(nt):
+    """Remove background compositor nodes if background is deleted or disabled."""
+    if nt is None:
+        return
+    for name in ("VFX_RL_BG", "VFX_BG_IMG", "VFX_BG_CLIP", "VFX_BG_SCALE"):
+        n = nt.nodes.get(name)
+        if n:
+            nt.nodes.remove(n)
+
+
+def ensure_background_node(vfx, master, nt):
+    """Create and configure the background source node and scale node.
+    Returns the background output socket (Image), or None if no background.
+    """
+    if nt is None:
+        return None
+
+    has_bg = getattr(vfx, "use_bg", False)
+    if not has_bg and getattr(vfx, "bg_scene", None) is not None:
+        # Backward compatibility: if bg_scene is set, treat background as active
+        has_bg = True
+
+    if not has_bg:
+        _cleanup_bg_nodes(nt)
+        return None
+
+    src_type = getattr(vfx, "bg_source_type", 'VIDEO')
+    fit_mode = getattr(vfx, "bg_fit_mode", 'STRETCH')
+
+    source_sock = None
+    loc_x, loc_y = 0, 450
+
+    if src_type == 'MOVIE_CLIP':
+        clip = getattr(vfx, "bg_movie_clip", None)
+        if clip is None and bpy.data.movieclips:
+            clip = bpy.data.movieclips[0]
+            try:
+                vfx.bg_movie_clip = clip
+            except Exception:
+                pass
+        if clip is not None:
+            cnode = nt.nodes.get("VFX_BG_CLIP")
+            if cnode is not None and cnode.type != 'MOVIECLIP':
+                nt.nodes.remove(cnode)
+                cnode = None
+            if cnode is None:
+                cnode = nt.nodes.new("CompositorNodeMovieClip")
+                cnode.name = "VFX_BG_CLIP"
+            cnode.label = f"BG Clip: {clip.name}"
+            cnode.clip = clip
+            cnode.location = (loc_x, loc_y)
+            source_sock = cnode.outputs.get("Image")
+        else:
+            old = nt.nodes.get("VFX_BG_CLIP")
+            if old:
+                nt.nodes.remove(old)
+
+    elif src_type in ('VIDEO', 'IMAGE'):
+        path = getattr(vfx, "bg_video_path" if src_type == 'VIDEO' else "bg_image_path", "")
+        # Fallback to movieclip if video path is empty but clip is chosen
+        if src_type == 'VIDEO' and not path and getattr(vfx, "bg_movie_clip", None):
+            clip = vfx.bg_movie_clip
+            cnode = nt.nodes.get("VFX_BG_CLIP")
+            if cnode is not None and cnode.type != 'MOVIECLIP':
+                nt.nodes.remove(cnode)
+                cnode = None
+            if cnode is None:
+                cnode = nt.nodes.new("CompositorNodeMovieClip")
+                cnode.name = "VFX_BG_CLIP"
+            cnode.label = f"BG Clip: {clip.name}"
+            cnode.clip = clip
+            cnode.location = (loc_x, loc_y)
+            source_sock = cnode.outputs.get("Image")
+        elif path:
+            abs_path = bpy.path.abspath(path)
+            if os.path.exists(abs_path):
+                ext = os.path.splitext(abs_path)[1].lower() if os.path.isfile(abs_path) else ""
+                # Video file: load into MovieClip for fast timeline playback
+                if src_type == 'VIDEO' and ext in ('.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v'):
+                    try:
+                        clip = bpy.data.movieclips.load(abs_path, check_existing=True)
+                        cnode = nt.nodes.get("VFX_BG_CLIP")
+                        if cnode is not None and cnode.type != 'MOVIECLIP':
+                            nt.nodes.remove(cnode)
+                            cnode = None
+                        if cnode is None:
+                            cnode = nt.nodes.new("CompositorNodeMovieClip")
+                            cnode.name = "VFX_BG_CLIP"
+                        cnode.label = f"BG Video: {os.path.basename(abs_path)}"
+                        cnode.clip = clip
+                        cnode.location = (loc_x, loc_y)
+                        source_sock = cnode.outputs.get("Image")
+                    except Exception as e:
+                        print(f"VFX: error loading bg movie clip: {e}")
+                else:
+                    # Image or image sequence (folder or single file)
+                    img_node = nt.nodes.get("VFX_BG_IMG")
+                    if img_node is not None and img_node.type != 'IMAGE':
+                        nt.nodes.remove(img_node)
+                        img_node = None
+                    if img_node is None:
+                        img_node = nt.nodes.new("CompositorNodeImage")
+                        img_node.name = "VFX_BG_IMG"
+                    img_node.label = f"BG {'Sequence' if src_type == 'VIDEO' else 'Image'}: {os.path.basename(abs_path)}"
+                    img_node.location = (loc_x, loc_y)
+
+                    img_name = f"VFX_BG_{src_type}"
+                    img = None
+                    existing = bpy.data.images.get(img_name)
+                    if existing is not None:
+                        ex_p = bpy.path.abspath(existing.filepath)
+                        if os.path.normcase(os.path.normpath(ex_p)) == os.path.normcase(os.path.normpath(abs_path)):
+                            img = existing
+                        else:
+                            try:
+                                bpy.data.images.remove(existing)
+                            except Exception:
+                                pass
+
+                    if img is None:
+                        if src_type == 'VIDEO' and os.path.isdir(abs_path):
+                            img, _, _ = load_matte_sequence_image(abs_path, name_prefix=img_name)
+                        else:
+                            try:
+                                img = bpy.data.images.load(abs_path, check_existing=False)
+                                img.name = img_name
+                            except Exception as e:
+                                print(f"VFX: error loading bg image: {e}")
+
+                    if img is not None:
+                        if src_type == 'VIDEO':
+                            _configure_image_node_sequence(img_node, img, is_static=False)
+                        else:
+                            _configure_image_node_sequence(img_node, img, is_static=True)
+                        source_sock = img_node.outputs.get("Image")
+
+    elif src_type == 'SCENE':
+        bg_scene = getattr(vfx, "bg_scene", None)
+        if bg_scene is not None:
+            if getattr(vfx, "comp_mode", 'LIVE') == 'FILES':
+                r_node = nt.nodes.get("VFX_RL_BG")
+                if r_node is not None and r_node.type != 'IMAGE':
+                    nt.nodes.remove(r_node)
+                    r_node = None
+                if r_node is None:
+                    r_node = nt.nodes.new("CompositorNodeImage")
+                    r_node.name = "VFX_RL_BG"
+                img = _load_sequence_image2(bg_scene.name, vfx.output_dir)
+                r_node.label = f"BACKGROUND ({bg_scene.name})"
+                r_node.location = (loc_x, loc_y)
+                _configure_image_node_sequence(r_node, img, is_static=getattr(vfx, "bg_is_static", True))
+                source_sock = r_node.outputs.get("Image")
+            else:
+                r_node = nt.nodes.get("VFX_RL_BG")
+                if r_node is not None and r_node.type != 'R_LAYERS':
+                    nt.nodes.remove(r_node)
+                    r_node = None
+                if r_node is None:
+                    r_node = nt.nodes.new("CompositorNodeRLayers")
+                    r_node.name = "VFX_RL_BG"
+                r_node.scene = bg_scene
+                r_node.label = "BACKGROUND"
+                r_node.location = (loc_x, loc_y)
+                source_sock = r_node.outputs.get("Image")
+
+    # Clean up nodes from other unused source types
+    if src_type != 'MOVIE_CLIP' and not (src_type == 'VIDEO' and source_sock and nt.nodes.get("VFX_BG_CLIP")):
+        old = nt.nodes.get("VFX_BG_CLIP")
+        if old and old.outputs.get("Image") != source_sock:
+            nt.nodes.remove(old)
+    if src_type not in ('VIDEO', 'IMAGE') or (src_type == 'VIDEO' and nt.nodes.get("VFX_BG_CLIP")):
+        old = nt.nodes.get("VFX_BG_IMG")
+        if old and old.outputs.get("Image") != source_sock:
+            nt.nodes.remove(old)
+    if src_type != 'SCENE':
+        old = nt.nodes.get("VFX_RL_BG")
+        if old and old.outputs.get("Image") != source_sock:
+            nt.nodes.remove(old)
+
+    if source_sock is None:
+        old_scale = nt.nodes.get("VFX_BG_SCALE")
+        if old_scale:
+            nt.nodes.remove(old_scale)
+        return None
+
+    # For 3D Scene renders, resolution already matches scene canvas
+    if src_type == 'SCENE':
+        old_scale = nt.nodes.get("VFX_BG_SCALE")
+        if old_scale:
+            nt.nodes.remove(old_scale)
+        return source_sock
+
+    # For 2D footage/images, scale to canvas render resolution
+    scale_node = nt.nodes.get("VFX_BG_SCALE")
+    if scale_node is None:
+        scale_node = _new_node(nt, "CompositorNodeScale")
+        if scale_node is not None:
+            scale_node.name = "VFX_BG_SCALE"
+    if scale_node is not None:
+        scale_node.label = f"Scale BG ({fit_mode})"
+        scale_node.location = (loc_x + 220, loc_y)
+        _setup_scale_node(scale_node, frame_method=fit_mode)
+        if scale_node.inputs:
+            for l in list(scale_node.inputs[0].links):
+                nt.links.remove(l)
+            nt.links.new(source_sock, scale_node.inputs[0])
+        return scale_node.outputs.get("Image") or source_sock
+
+    return source_sock
 
 
 def rebuild_comp_from_files(vfx, master):
@@ -359,10 +1277,12 @@ def rebuild_comp_from_files(vfx, master):
             node["vfx_pass"] = "OBJECT"
             node.location = (0, y)
 
-        if layer.shadow_scene:
+        if layer.shadow_scene or getattr(layer, "shadow_tech", '3D') == 'AI':
             node_name = f"VFX_RL_{layer.id}_SHD"
             valid_names.add(node_name)
-            img = _load_sequence_image2(layer.shadow_scene.name, vfx.output_dir)
+            is_ai = getattr(layer, "shadow_tech", '3D') == 'AI'
+            src_folder = f"VFX_{layer.layer_name}_AI_SHD" if is_ai else layer.shadow_scene.name
+            img = _load_sequence_image2(src_folder, vfx.output_dir)
 
             node = nt.nodes.get(node_name)
             if node is not None and node.type != 'IMAGE':
@@ -373,15 +1293,17 @@ def rebuild_comp_from_files(vfx, master):
                 node.name = node_name
             node.image = None
             _configure_image_node_sequence(node, img, is_static=False)
-            node.label = f"{layer.layer_name} SHD"
+            node.label = f"{layer.layer_name} AI SHD" if is_ai else f"{layer.layer_name} SHD"
             node["vfx_id"] = layer.id
             node["vfx_pass"] = "SHADOW"
             node.location = (350, y)
 
         y -= 220
 
+    has_bg = getattr(vfx, "use_bg", False)
+    bg_src = getattr(vfx, "bg_source_type", 'VIDEO')
     bg_scene = getattr(vfx, "bg_scene", None)
-    if bg_scene:
+    if bg_scene and (bg_src == 'SCENE' or not has_bg):
         valid_names.add("VFX_RL_BG")
         node_name = "VFX_RL_BG"
         img = _load_sequence_image2(bg_scene.name, vfx.output_dir)
@@ -534,8 +1456,10 @@ def rebuild_comp(vfx, master):
 
         y -= 220
 
+    has_bg = getattr(vfx, "use_bg", False)
+    bg_src = getattr(vfx, "bg_source_type", 'VIDEO')
     bg_scene = getattr(vfx, "bg_scene", None)
-    if bg_scene:
+    if bg_scene and (bg_src == 'SCENE' or not has_bg):
         valid_nodes.add("VFX_RL_BG")
         ensure_render_node(master, bg_scene, "VFX_RL_BG", "BACKGROUND", "BG", "OBJECT", x=0, y=y)
     if getattr(vfx, "use_fog", False) or getattr(vfx, "use_dof", False):
@@ -842,16 +1766,7 @@ def build_mask(nt, props, name_prefix, source, invert, soft,
                 bl = None
         if bl is not None:
             bl.label = f"MASK {name_prefix} soft"
-            bl.location = (-2300, 0)
-            try:
-                bl.blur_method = 'GAUSS'
-            except Exception:
-                pass
-            try:
-                bl.size_x = max(1, int(round(soft)))
-                bl.size_y = max(1, int(round(soft)))
-            except Exception:
-                pass
+            _setup_blur_node(bl, soft, soft)
             for l in list(bl.inputs[0].links):
                 nt.links.remove(l)
             nt.links.new(sock, bl.inputs[0])
@@ -1657,6 +2572,25 @@ def build_comp_assembly(vfx, master, nt=None):
     for node in list(nt.nodes):
         if node.type == 'CRYPTOMATTE' and node.name not in ("VFX_CRYPTO_PICK",) and node.name not in CRYPTO_INFL_NODES.values():
             nt.nodes.remove(node)
+
+    # Clean up inactive / deleted matte sequence nodes
+    active_matte_ids = {layer.id for layer in vfx.layers if getattr(layer, "use_holdout_matte", False)}
+    for node in list(nt.nodes):
+        if node.name.startswith("VFX_MATTE_"):
+            parts = node.name.split("_")
+            lid = parts[-1]
+            if lid not in active_matte_ids:
+                nt.nodes.remove(node)
+
+    # Clean up inactive / deleted shadow filter nodes
+    active_shd_ids = {layer.id for layer in vfx.layers if layer.shadow_scene or getattr(layer, "shadow_tech", '3D') == 'AI'}
+    for node in list(nt.nodes):
+        if node.name.startswith("VFX_SHD_RAMP_") or node.name.startswith("VFX_SHD_BLUR_"):
+            parts = node.name.split("_")
+            lid = parts[-1]
+            if lid not in active_shd_ids:
+                nt.nodes.remove(node)
+
     # ── COMPUTED STACKING ORDER (back -> front) ──
     # AUTO: by camera distance (nearest layer on top) | MANUAL: list order.
     # BACKGROUND (bg_sock) is always composited first = bottom.
@@ -1670,10 +2604,12 @@ def build_comp_assembly(vfx, master, nt=None):
         sh_sock = None
         ob_sock = None
 
-        if layer.shadow_scene:
+        if layer.shadow_scene or getattr(layer, "shadow_tech", '3D') == 'AI':
             sh = nt.nodes.get(f"VFX_RL_{layer.id}_SHD")
-            if sh and sh.outputs.get("Image"):
-                sh_sock = sh.outputs["Image"]
+            if sh:
+                sh_sock = apply_shadow_filter(nt, layer, sh, loc_x=550, loc_y=-len(sockets) * 200)
+                if sh_sock is None and sh.outputs.get("Image"):
+                    sh_sock = sh.outputs["Image"]
 
         if layer.scene:
             ob = nt.nodes.get(f"VFX_RL_{layer.id}")
@@ -1693,10 +2629,7 @@ def build_comp_assembly(vfx, master, nt=None):
             if ob_sock:
                 sockets.append((layer, "OBJ", ob_sock))
 
-    bg_sock = None
-    bgn = nt.nodes.get("VFX_RL_BG")
-    if bgn is not None and bgn.outputs.get("Image"):
-        bg_sock = bgn.outputs["Image"]
+    bg_sock = ensure_background_node(vfx, master, nt)
 
     if not sockets and bg_sock is None:
         return
@@ -1864,6 +2797,16 @@ def build_comp_assembly(vfx, master, nt=None):
     elif sockets:
         first_layer, first_kind, first_sock = sockets[0]
         stack_sock = blur_nodes.get(first_layer.id, grade_nodes.get(first_layer.id, first_sock)) if first_kind == 'OBJ' else first_sock
+        if first_kind == 'OBJ':
+            if getattr(first_layer, "use_holdout_matte", False):
+                stack_sock = apply_layer_matte(nt, first_layer, stack_sock, is_shadow=False, loc_x=600, loc_y=0)
+            else:
+                cleanup_layer_matte_nodes(nt, first_layer.id)
+        elif first_kind == 'SHD':
+            if getattr(first_layer, "use_holdout_matte", False) and getattr(first_layer, "holdout_matte_mask_shadow", True):
+                stack_sock = apply_layer_matte(nt, first_layer, stack_sock, is_shadow=True, loc_x=600, loc_y=0)
+            else:
+                cleanup_layer_matte_nodes(nt, first_layer.id)
         mix_list = sockets[1:]
     else:
         stack_sock = None
@@ -1881,35 +2824,71 @@ def build_comp_assembly(vfx, master, nt=None):
                 if gsock is not None:
                     sock = gsock
 
-        mix = nt.nodes.new("CompositorNodeAlphaOver")
-        mix.name = f"VFX_MIX_{mix_index:02d}"
-        mix.label = f"{layer.layer_name} {kind}"
-        mix["vfx_mix"] = 1
-        mix.location = (800, -mix_index * 200)
+            if getattr(layer, "use_holdout_matte", False):
+                sock = apply_layer_matte(nt, layer, sock, is_shadow=False, loc_x=600, loc_y=-mix_index * 200)
+            else:
+                cleanup_layer_matte_nodes(nt, layer.id)
+        elif kind == 'SHD':
+            if getattr(layer, "use_holdout_matte", False) and getattr(layer, "holdout_matte_mask_shadow", True):
+                sock = apply_layer_matte(nt, layer, sock, is_shadow=True, loc_x=600, loc_y=-mix_index * 200)
 
-        img = [s for s in mix.inputs if s.type == 'RGBA']
-        fac = [s for s in mix.inputs if s.type == 'VALUE']
+        is_ai_shd = (kind == 'SHD' and getattr(layer, "shadow_tech", '3D') == 'AI')
 
-        if len(img) >= 2:
-            bg, fg = img[0], img[1]
+        if is_ai_shd:
+            # AI Shadow uses Multiply / Darken Mix node directly onto background stack
+            # to preserve ground texture and avoid opaque alpha over-darkening.
+            blend_type = getattr(layer, "ai_shadow_blend_mode", 'MULTIPLY')
+            mix, a_in, b_in, fac_in, out_s = _make_mix_node(
+                nt,
+                f"VFX_AI_SHD_MIX_{mix_index:02d}",
+                f"{layer.layer_name} AI Shadow ({blend_type})",
+                blend_mode=blend_type,
+                location=(800, -mix_index * 200)
+            )
+            if mix is not None:
+                mix["vfx_mix"] = 1
+                mix_fac = getattr(layer, "shadow_strength", 1.0)
+                if fac_in is not None:
+                    try:
+                        fac_in.default_value = mix_fac
+                    except Exception:
+                        pass
+                if a_in is not None and current is not None:
+                    nt.links.new(current, a_in)
+                if b_in is not None and sock is not None:
+                    nt.links.new(sock, b_in)
+                current = out_s if out_s is not None else current
+                mix_index += 1
         else:
-            bg, fg = mix.inputs[1], mix.inputs[2]
+            mix = nt.nodes.new("CompositorNodeAlphaOver")
+            mix.name = f"VFX_MIX_{mix_index:02d}"
+            mix.label = f"{layer.layer_name} {kind}"
+            mix["vfx_mix"] = 1
+            mix.location = (800, -mix_index * 200)
 
-        mix_fac = 1.0
-        if kind == 'SHD':
-            mix_fac = getattr(layer, "shadow_strength", 1.0)
-        for f in fac:
-            try:
-                f.default_value = mix_fac
-            except Exception:
-                pass
+            img = [s for s in mix.inputs if s.type == 'RGBA']
+            fac = [s for s in mix.inputs if s.type == 'VALUE']
 
-        nt.links.new(current, bg)
-        nt.links.new(sock, fg)
+            if len(img) >= 2:
+                bg, fg = img[0], img[1]
+            else:
+                bg, fg = mix.inputs[1], mix.inputs[2]
 
-        outs = [s for s in mix.outputs if s.type == 'RGBA']
-        current = outs[0] if outs else mix.outputs[0]
-        mix_index += 1
+            mix_fac = 1.0
+            if kind == 'SHD':
+                mix_fac = getattr(layer, "shadow_strength", 1.0)
+            for f in fac:
+                try:
+                    f.default_value = mix_fac
+                except Exception:
+                    pass
+
+            nt.links.new(current, bg)
+            nt.links.new(sock, fg)
+
+            outs = [s for s in mix.outputs if s.type == 'RGBA']
+            current = outs[0] if outs else mix.outputs[0]
+            mix_index += 1
 
     # ── FOG: assembled stack -> VFX_FogGroup ──
     if getattr(vfx, "use_fog", False):

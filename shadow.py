@@ -5,7 +5,10 @@ import bmesh
 import os
 from mathutils import Vector
 
-from .core import ensure_root, ensure_camera_collection, ensure_light_collection
+from .core import (
+    ensure_root, ensure_camera_collection, ensure_light_collection,
+    link_collection_to_scene, exclude_collection_in_master,
+)
 
 
 def set_shadow_catcher(obj, state=True):
@@ -52,8 +55,115 @@ def set_only_shadow_caster(obj):
         pass
 
 
+def set_bounce_caster(obj):
+    """Mark object as invisible to camera, but actively contributing to diffuse/glossy/transmission bounces."""
+    if hasattr(obj, "is_shadow_catcher"):
+        try:
+            obj.is_shadow_catcher = False
+        except Exception:
+            pass
+    if hasattr(obj, "is_holdout"):
+        try:
+            obj.is_holdout = False
+        except Exception:
+            pass
+    if hasattr(obj, "visible_camera"):
+        try:
+            obj.visible_camera = False
+            obj.visible_shadow = True
+            obj.visible_diffuse = True
+            obj.visible_glossy = True
+            obj.visible_transmission = True
+            obj.visible_volume_scatter = True
+            return
+        except Exception:
+            pass
+    try:
+        if hasattr(obj, "cycles_visibility"):
+            vis = obj.cycles_visibility
+            vis.camera = False
+            vis.shadow = True
+            for attr in ("diffuse", "glossy", "transmission", "volume_scatter"):
+                try:
+                    setattr(vis, attr, True)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def sync_layer_bounce_proxy(layer, master):
+    """Ensure a camera-invisible bounce proxy of shadow_catcher is present in layer.scene.
+    This gives the 3D layer realistic GI bounce lighting and reflections from the ground/catcher,
+    while keeping the camera view transparent.
+    """
+    sc_obj = layer.scene
+    catcher = layer.shadow_catcher
+    use_bounce = getattr(layer, "shadow_catcher_bounce", True)
+
+    bounce_col = getattr(layer, "shadow_bounce_collection", None)
+
+    if not sc_obj or not catcher or not use_bounce or sc_obj == master:
+        if bounce_col:
+            for obj in list(bounce_col.objects):
+                if obj.get("vfx_proxy") == layer.id:
+                    try:
+                        bpy.data.objects.remove(obj, do_unlink=True)
+                    except Exception:
+                        pass
+        return
+
+    # Check if catcher is already an object in layer.collection
+    if layer.collection and catcher.name in layer.collection.objects:
+        return
+
+    # Ensure collection exists
+    root = ensure_root(master)
+    if not bounce_col or bounce_col.name not in bpy.data.collections:
+        b_name = f"VFX_{layer.layer_name}_SHD_BOUNCE"
+        bounce_col = bpy.data.collections.get(b_name)
+        if not bounce_col:
+            bounce_col = bpy.data.collections.new(b_name)
+            root.children.link(bounce_col)
+        layer.shadow_bounce_collection = bounce_col
+        bounce_col["vfx_id"] = layer.id
+        bounce_col["vfx_pass"] = "SHADOW_BOUNCE"
+        exclude_collection_in_master(master, bounce_col)
+
+    # Ensure bounce_col is linked to layer.scene
+    link_collection_to_scene(sc_obj, bounce_col)
+
+    # Clean stale proxies
+    proxy_name = f"{catcher.name}_VFXBounce"
+    for obj in list(bounce_col.objects):
+        if obj.get("vfx_proxy") == layer.id and obj.name != proxy_name:
+            try:
+                bpy.data.objects.remove(obj, do_unlink=True)
+            except Exception:
+                pass
+
+    # Ensure proxy exists
+    proxy = bounce_col.objects.get(proxy_name)
+    if proxy is None:
+        proxy = catcher.copy()
+        proxy.name = proxy_name
+        if getattr(catcher, "data", None):
+            proxy.data = catcher.data
+        proxy["vfx_proxy"] = layer.id
+        proxy["vfx_pass"] = "SHADOW_BOUNCE"
+        bounce_col.objects.link(proxy)
+
+        # Copy transforms constraint so it tracks catcher animation/transforms
+        con = proxy.constraints.new('COPY_TRANSFORMS')
+        con.target = catcher
+
+    # Configure as bounce caster
+    set_bounce_caster(proxy)
+
+
 def refresh_shadow_proxies(vfx, master):
     for layer in vfx.layers:
+        sync_layer_bounce_proxy(layer, master)
         if not layer.shadow_scene:
             continue
         cast_col = layer.shadow_cast_collection
@@ -216,8 +326,16 @@ def refresh_shadow_proxies(vfx, master):
                     continue
                 p = make_proxy(obj, "_VFXShadowCaster", cast_col)
                 set_only_shadow_caster(p)
-            if catcher and catch_col.objects.get(catcher.name) is None:
-                catch_col.objects.link(catcher)
+            if catcher:
+                for old_obj in list(catch_col.objects):
+                    if old_obj != catcher and not old_obj.get("vfx_proxy"):
+                        try:
+                            catch_col.objects.unlink(old_obj)
+                        except Exception:
+                            pass
+                if catch_col.objects.get(catcher.name) is None:
+                    catch_col.objects.link(catcher)
+                set_shadow_catcher(catcher, True)
 
 
 def repair_shadow_proxies():

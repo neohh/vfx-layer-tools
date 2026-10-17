@@ -98,6 +98,27 @@ def ensure_camera(master):
     return cam_obj
 
 
+def ensure_camera_dependencies(collection, cam_obj):
+    """Link parent chain and constraint target Empties of the camera into collection.
+
+    If camera is parented to an Empty (common in motion tracking / AutoTracker),
+    or constrained to an Empty, that Empty MUST be linked to every layer scene,
+    otherwise Blender's depsgraph fails to evaluate camera motion during render.
+    """
+    if not cam_obj or not collection:
+        return
+    ensure_parent_empties(collection, [cam_obj])
+    for c in getattr(cam_obj, "constraints", []):
+        target = getattr(c, "target", None)
+        if target is not None and getattr(target, "type", "") == 'EMPTY':
+            if collection.objects.get(target.name) is None:
+                try:
+                    collection.objects.link(target)
+                except Exception:
+                    pass
+            ensure_parent_empties(collection, [target])
+
+
 def ensure_camera_collection(master, root):
     col = bpy.data.collections.get("VFX_Camera")
     if not col:
@@ -107,7 +128,19 @@ def ensure_camera_collection(master, root):
     cam_obj = ensure_camera(master)
     if col.objects.get(cam_obj.name) is None:
         col.objects.link(cam_obj)
+    ensure_camera_dependencies(col, cam_obj)
     return col
+
+
+def link_camera_to_all_scenes(vfx, col):
+    for layer in vfx.layers:
+        if layer.scene:
+            link_collection_to_scene(layer.scene, col)
+        if layer.shadow_scene:
+            link_collection_to_scene(layer.shadow_scene, col)
+    bg = getattr(vfx, "bg_scene", None)
+    if bg:
+        link_collection_to_scene(bg, col)
 
 
 def ensure_light_collection(master, root):
@@ -182,6 +215,53 @@ def link_collection_to_scene(scene, collection):
         scene.collection.children.link(collection)
 
 
+def ensure_cycles_gpu(scene=None):
+    """Ensure OptiX / CUDA GPU compute is active in Cycles preferences if available."""
+    try:
+        cprefs = bpy.context.preferences.addons.get('cycles')
+        if cprefs and hasattr(cprefs, 'preferences'):
+            p = cprefs.preferences
+            if p.compute_device_type == 'NONE':
+                for dev_type in ('OPTIX', 'CUDA', 'HIP', 'ONEAPI', 'METAL'):
+                    try:
+                        p.compute_device_type = dev_type
+                        p.get_devices()
+                        has_active = any(d.use for d in p.devices if d.type == dev_type)
+                        if has_active:
+                            break
+                    except Exception:
+                        pass
+        if scene and hasattr(scene, 'cycles'):
+            if cprefs and getattr(cprefs.preferences, 'compute_device_type', 'NONE') != 'NONE':
+                scene.cycles.device = 'GPU'
+    except Exception as e:
+        print("VFX ensure_cycles_gpu error:", e)
+
+
+def optimize_shadow_scene_cycles(scene, samples=8):
+    """Optimize Cycles render settings specifically for ultra-fast shadow pass rendering."""
+    if not scene or not hasattr(scene, 'cycles'):
+        return
+    ensure_cycles_gpu(scene)
+    c = scene.cycles
+    try:
+        c.samples = max(1, samples)
+    except Exception:
+        pass
+    try:
+        c.max_bounces = 2
+        c.diffuse_bounces = 1
+        c.glossy_bounces = 0
+        c.transmission_bounces = 0
+        c.volume_bounces = 0
+        c.transparent_max_bounces = 4
+        c.caustics_reflective = False
+        c.caustics_refractive = False
+        c.use_denoising = True
+    except Exception:
+        pass
+
+
 def sync_engine_settings(master, scene):
     for attr in ("cycles", "eevee"):
         src = getattr(master, attr, None)
@@ -208,6 +288,16 @@ def sync_scene_settings(master, scene):
     try:
         scene.frame_start = master.frame_start
         scene.frame_end = master.frame_end
+    except Exception:
+        pass
+    try:
+        scene.render.fps = master.render.fps
+        scene.render.fps_base = master.render.fps_base
+    except Exception:
+        pass
+    try:
+        if master.camera:
+            scene.camera = master.camera
     except Exception:
         pass
     try:
@@ -303,6 +393,18 @@ def remove_shadow_collections(layer):
             bpy.data.collections.remove(layer.shadow_catch_collection)
         except Exception:
             pass
+    if getattr(layer, "shadow_bounce_collection", None):
+        for obj in list(layer.shadow_bounce_collection.objects):
+            if obj.get("vfx_proxy") == layer.id:
+                try:
+                    bpy.data.objects.remove(obj, do_unlink=True)
+                except Exception:
+                    pass
+        try:
+            bpy.data.collections.remove(layer.shadow_bounce_collection)
+        except Exception:
+            pass
+        layer.shadow_bounce_collection = None
 
 
 def rename_layer(layer, name):
@@ -319,5 +421,7 @@ def rename_layer(layer, name):
         layer.shadow_cast_collection.name = f"VFX_{name}_SHD_CAST"
     if layer.shadow_catch_collection:
         layer.shadow_catch_collection.name = f"VFX_{name}_SHD_CATCH"
+    if getattr(layer, "shadow_bounce_collection", None):
+        layer.shadow_bounce_collection.name = f"VFX_{name}_SHD_BOUNCE"
     if layer.shadow_catcher and layer.shadow_catcher.name.startswith("VFX_"):
         layer.shadow_catcher.name = f"VFX_{name}_ShadowCatcher"

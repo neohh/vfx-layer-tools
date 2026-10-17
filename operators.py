@@ -16,11 +16,12 @@ from .core import (
     create_empty_scene, exclude_collection_in_master, link_collection_to_scene,
     sync_scene_settings, remove_scene_safe, remove_shadow_collections,
     rename_layer, link_lights_to_all_scenes, sync_master_lights,
-    ensure_parent_empties,
+    ensure_parent_empties, ensure_cycles_gpu, optimize_shadow_scene_cycles,
+    link_camera_to_all_scenes, ensure_camera_dependencies,
 )
 from .shadow import (
     set_shadow_catcher, set_only_shadow_caster, refresh_shadow_proxies,
-    create_default_catcher, setup_shadow_isolation_comp,
+    create_default_catcher, setup_shadow_isolation_comp, sync_layer_bounce_proxy,
 )
 from .occlusion import (
     rebuild_all_occlusion, rebuild_layer_occlusion, remove_occlusion_collection,
@@ -265,6 +266,125 @@ class VFX_OT_add_selected_lights(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def create_shadow_pass_for_layer(layer, vfx, master, mode='CAST'):
+    if not layer or not layer.collection or len(layer.collection.objects) == 0:
+        return None
+    if layer.shadow_scene:
+        return layer.shadow_scene
+    root = ensure_root(master)
+    cam_col = ensure_camera_collection(master, root)
+    light_col = ensure_light_collection(master, root)
+    cast_col = bpy.data.collections.new(f"VFX_{layer.layer_name}_SHD_CAST")
+    catch_col = bpy.data.collections.new(f"VFX_{layer.layer_name}_SHD_CATCH")
+    root.children.link(cast_col)
+    root.children.link(catch_col)
+    layer.shadow_cast_collection = cast_col
+    layer.shadow_catch_collection = catch_col
+    layer.shadow_mode = mode
+    cast_col["vfx_id"] = layer.id
+    cast_col["vfx_pass"] = "SHADOW_CAST"
+    catch_col["vfx_id"] = layer.id
+    catch_col["vfx_pass"] = "SHADOW_CATCH"
+    exclude_collection_in_master(master, cast_col)
+    exclude_collection_in_master(master, catch_col)
+    drawable = {'MESH', 'CURVE', 'VOLUME', 'SURFACE', 'META'}
+    made_cast = 0
+    made_catch = 0
+    def make_proxy(obj, suffix, col):
+        proxy = obj.copy()
+        proxy.name = obj.name + suffix
+        if getattr(obj, "data", None):
+            proxy.data = obj.data
+        proxy["vfx_proxy"] = layer.id
+        chain = []
+        node = obj.parent
+        ok_chain = True
+        while node is not None:
+            if node.type == 'EMPTY':
+                chain.append(node)
+                node = node.parent
+            else:
+                ok_chain = False
+                break
+        if ok_chain:
+            for n in chain:
+                if n.name not in col.objects:
+                    try:
+                        col.objects.link(n)
+                    except Exception:
+                        pass
+        else:
+            try:
+                mw = obj.matrix_world.copy()
+            except Exception:
+                mw = None
+            proxy.parent = None
+            proxy.matrix_parent_inverse.identity()
+            if mw is not None:
+                proxy.matrix_basis = mw
+        if col.objects.get(proxy.name) is None:
+            col.objects.link(proxy)
+        return proxy
+    if mode == 'RECEIVE':
+        for obj in layer.collection.objects:
+            if obj.type not in drawable:
+                continue
+            p = make_proxy(obj, "_VFXCatch", catch_col)
+            set_shadow_catcher(p, True)
+            made_catch += 1
+        for other in vfx.layers:
+            if other.id == layer.id or not other.enabled or not other.collection:
+                continue
+            for obj in other.collection.objects:
+                if obj.type not in drawable:
+                    continue
+                p = make_proxy(obj, "_VFXShadowCaster", cast_col)
+                set_only_shadow_caster(p)
+                made_cast += 1
+    else:
+        catcher = layer.shadow_catcher
+        if not catcher:
+            catcher = create_default_catcher(layer, master)
+            layer.shadow_catcher = catcher
+        for obj in layer.collection.objects:
+            if catcher and obj == catcher:
+                continue
+            if obj.type not in drawable:
+                continue
+            p = make_proxy(obj, "_VFXShadowCaster", cast_col)
+            set_only_shadow_caster(p)
+            made_cast += 1
+        if catch_col.objects.get(catcher.name) is None:
+            catch_col.objects.link(catcher)
+        set_shadow_catcher(catcher, True)
+        made_catch += 1
+    scene = create_empty_scene(f"VFX_{layer.layer_name}_SHD", master)
+    scene["vfx_id"] = layer.id
+    scene["vfx_pass"] = "SHADOW"
+    scene.vfx.master_scene = master
+    link_collection_to_scene(scene, cast_col)
+    link_collection_to_scene(scene, catch_col)
+    link_collection_to_scene(scene, cam_col)
+    link_collection_to_scene(scene, light_col)
+    if master.camera:
+        scene.camera = master.camera
+    sync_scene_settings(master, scene)
+    try:
+        scene.render.engine = vfx.shadows_engine
+    except Exception:
+        pass
+    if scene.render.engine == 'CYCLES':
+        optimize_shadow_scene_cycles(scene, samples=getattr(layer, 'shadow_samples', 8))
+    layer.shadow_scene = scene
+    layer.use_shadow = True
+    try:
+        sync_layer_bounce_proxy(layer, master)
+    except Exception as e:
+        print(f"VFX bounce proxy error: {e}")
+    rebuild_comp(vfx, master)
+    return scene
+
+
 class VFX_OT_create_shadow_pass(bpy.types.Operator):
     bl_idname = "vfx.create_shadow_pass"
     bl_label = "Create Shadow Pass"
@@ -274,19 +394,27 @@ class VFX_OT_create_shadow_pass(bpy.types.Operator):
         items=(('CAST', "Cast shadow", "Layer objects cast shadow onto a catcher"),
                ('RECEIVE', "Receive shadow", "Layer receives shadows from other layers (separate pass)")),
         default='CAST')
+    layer_index: IntProperty(name="Layer Index", default=-1)
+
     def invoke(self, context, event):
         vfx, master = get_project(context)
-        layer = active_layer(vfx)
+        idx = self.layer_index
+        layer = vfx.layers[idx] if (0 <= idx < len(vfx.layers)) else active_layer(vfx)
         if not layer:
             self.report({'ERROR'}, "No active layer")
             return {'CANCELLED'}
         if layer.shadow_scene:
             self.report({'WARNING'}, "Shadow pass already exists")
             return {'CANCELLED'}
+        if layer.shadow_catcher:
+            self.mode = 'CAST'
+            return self.execute(context)
         return context.window_manager.invoke_props_dialog(self)
+
     def execute(self, context):
         vfx, master = get_project(context, allow_write=True)
-        layer = active_layer(vfx)
+        idx = self.layer_index
+        layer = vfx.layers[idx] if (0 <= idx < len(vfx.layers)) else active_layer(vfx)
         if not layer:
             self.report({'ERROR'}, "No active layer")
             return {'CANCELLED'}
@@ -296,117 +424,32 @@ class VFX_OT_create_shadow_pass(bpy.types.Operator):
         if layer.shadow_scene:
             self.report({'WARNING'}, "Shadow pass already exists")
             return {'CANCELLED'}
-        root = ensure_root(master)
-        cam_col = ensure_camera_collection(master, root)
-        light_col = ensure_light_collection(master, root)
-        cast_col = bpy.data.collections.new(f"VFX_{layer.layer_name}_SHD_CAST")
-        catch_col = bpy.data.collections.new(f"VFX_{layer.layer_name}_SHD_CATCH")
-        root.children.link(cast_col)
-        root.children.link(catch_col)
-        layer.shadow_cast_collection = cast_col
-        layer.shadow_catch_collection = catch_col
-        layer.shadow_mode = self.mode
-        cast_col["vfx_id"] = layer.id
-        cast_col["vfx_pass"] = "SHADOW_CAST"
-        catch_col["vfx_id"] = layer.id
-        catch_col["vfx_pass"] = "SHADOW_CATCH"
-        exclude_collection_in_master(master, cast_col)
-        exclude_collection_in_master(master, catch_col)
-        drawable = {'MESH', 'CURVE', 'VOLUME', 'SURFACE', 'META'}
-        made_cast = 0
-        made_catch = 0
-        def make_proxy(obj, suffix, col):
-            proxy = obj.copy()
-            proxy.name = obj.name + suffix
-            if getattr(obj, "data", None):
-                proxy.data = obj.data
-            proxy["vfx_proxy"] = layer.id
-            chain = []
-            node = obj.parent
-            ok_chain = True
-            while node is not None:
-                if node.type == 'EMPTY':
-                    chain.append(node)
-                    node = node.parent
-                else:
-                    ok_chain = False
-                    break
-            if ok_chain:
-                for n in chain:
-                    if n.name not in col.objects:
-                        try:
-                            col.objects.link(n)
-                        except Exception:
-                            pass
-            else:
-                try:
-                    mw = obj.matrix_world.copy()
-                except Exception:
-                    mw = None
-                proxy.parent = None
-                proxy.matrix_parent_inverse.identity()
-                if mw is not None:
-                    proxy.matrix_basis = mw
-            if col.objects.get(proxy.name) is None:
-                col.objects.link(proxy)
-            return proxy
-        if self.mode == 'RECEIVE':
-            for obj in layer.collection.objects:
-                if obj.type not in drawable:
-                    continue
-                p = make_proxy(obj, "_VFXCatch", catch_col)
-                set_shadow_catcher(p, True)
-                made_catch += 1
-            for other in vfx.layers:
-                if other.id == layer.id or not other.enabled or not other.collection:
-                    continue
-                for obj in other.collection.objects:
-                    if obj.type not in drawable:
-                        continue
-                    p = make_proxy(obj, "_VFXShadowCaster", cast_col)
-                    set_only_shadow_caster(p)
-                    made_cast += 1
+        scene = create_shadow_pass_for_layer(layer, vfx, master, mode=self.mode)
+        if scene:
+            self.report({'INFO'}, f"Shadow pass created: {scene.name}")
+            return {'FINISHED'}
         else:
-            catcher = layer.shadow_catcher
-            if not catcher:
-                catcher = create_default_catcher(layer, master)
-                layer.shadow_catcher = catcher
-            for obj in layer.collection.objects:
-                if catcher and obj == catcher:
-                    continue
-                if obj.type not in drawable:
-                    continue
-                p = make_proxy(obj, "_VFXShadowCaster", cast_col)
-                set_only_shadow_caster(p)
-                made_cast += 1
-            if catch_col.objects.get(catcher.name) is None:
-                catch_col.objects.link(catcher)
-            set_shadow_catcher(catcher, True)
-            made_catch += 1
-        scene = create_empty_scene(f"VFX_{layer.layer_name}_SHD", master)
-        scene["vfx_id"] = layer.id
-        scene["vfx_pass"] = "SHADOW"
-        scene.vfx.master_scene = master
-        link_collection_to_scene(scene, cast_col)
-        link_collection_to_scene(scene, catch_col)
-        link_collection_to_scene(scene, cam_col)
-        link_collection_to_scene(scene, light_col)
-        if master.camera:
-            scene.camera = master.camera
-        sync_scene_settings(master, scene)
+            self.report({'ERROR'}, "Could not create shadow pass")
+            return {'CANCELLED'}
+
+
+class VFX_OT_enable_gpu_compute(bpy.types.Operator):
+    bl_idname = "vfx.enable_gpu_compute"
+    bl_label = "Enable GPU Compute for Cycles"
+    bl_description = "Enable OptiX / CUDA GPU acceleration in Cycles for fast rendering"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=True)
+        ensure_cycles_gpu(master)
+        for sc in bpy.data.scenes:
+            if hasattr(sc, 'cycles'):
+                sc.cycles.device = 'GPU'
         try:
-            scene.render.engine = vfx.shadows_engine
+            bpy.ops.wm.save_userpref()
         except Exception:
             pass
-        try:
-            if scene.render.engine == 'CYCLES':
-                scene.cycles.samples = 32
-        except Exception:
-            pass
-        layer.shadow_scene = scene
-        layer.use_shadow = True
-        rebuild_comp(vfx, master)
-        self.report({'INFO'}, f"Shadow pass ({self.mode}): {made_cast} casters, {made_catch} catchers")
+        self.report({'INFO'}, "GPU OptiX / CUDA ускорение успешно активировано для Cycles!")
         return {'FINISHED'}
 
 
@@ -432,6 +475,8 @@ class VFX_OT_delete_layer(bpy.types.Operator):
             return {'CANCELLED'}
         remove_comp_node(master, f"VFX_RL_{layer.id}")
         remove_comp_node(master, f"VFX_RL_{layer.id}_SHD")
+        remove_comp_node(master, f"VFX_SHD_RAMP_{layer.id}")
+        remove_comp_node(master, f"VFX_SHD_BLUR_{layer.id}")
         if layer.scene and layer.scene != master:
             remove_scene_safe(context, layer.scene, master)
         if layer.shadow_scene and layer.shadow_scene != master:
@@ -869,10 +914,20 @@ class VFX_OT_render_all_layers(bpy.types.Operator):
             scenes.append(vfx.bg_scene)
         elif only_shd >= 0 and only_shd < len(vfx.layers):
             layer = vfx.layers[only_shd]
+            if layer.shadow_catcher and not layer.shadow_scene:
+                try:
+                    create_shadow_pass_for_layer(layer, vfx, master, mode=getattr(layer, "shadow_mode", 'CAST') or 'CAST')
+                except Exception as e:
+                    print(f"VFX auto shadow error: {e}")
             if layer.shadow_scene:
                 scenes.append(layer.shadow_scene)
         elif only >= 0 and only < len(vfx.layers):
             layer = vfx.layers[only]
+            if self.include_layer_shadow and layer.shadow_catcher and not layer.shadow_scene:
+                try:
+                    create_shadow_pass_for_layer(layer, vfx, master, mode=getattr(layer, "shadow_mode", 'CAST') or 'CAST')
+                except Exception as e:
+                    print(f"VFX auto shadow error: {e}")
             if layer.scene:
                 scenes.append(layer.scene)
             if self.include_layer_shadow and layer.shadow_scene:
@@ -884,6 +939,11 @@ class VFX_OT_render_all_layers(bpy.types.Operator):
                 if act:
                     sel_layers = [act]
             for layer in sel_layers:
+                if self.include_layer_shadow and layer.shadow_catcher and not layer.shadow_scene:
+                    try:
+                        create_shadow_pass_for_layer(layer, vfx, master, mode=getattr(layer, "shadow_mode", 'CAST') or 'CAST')
+                    except Exception as e:
+                        print(f"VFX auto shadow error: {e}")
                 if layer.scene:
                     scenes.append(layer.scene)
                 if self.include_layer_shadow and layer.shadow_scene:
@@ -892,6 +952,11 @@ class VFX_OT_render_all_layers(bpy.types.Operator):
             for layer in vfx.layers:
                 if not layer.enabled:
                     continue
+                if layer.shadow_catcher and not layer.shadow_scene:
+                    try:
+                        create_shadow_pass_for_layer(layer, vfx, master, mode=getattr(layer, "shadow_mode", 'CAST') or 'CAST')
+                    except Exception as e:
+                        print(f"VFX auto shadow error: {e}")
                 if layer.scene:
                     scenes.append(layer.scene)
                 if layer.shadow_scene:
@@ -922,6 +987,13 @@ class VFX_OT_render_all_layers(bpy.types.Operator):
         total_frames = 0
         already_done_frames = 0
         resume = getattr(vfx, "resume_render", True)
+
+        for sc in scenes:
+            if getattr(sc.render, "engine", "") == 'CYCLES':
+                ensure_cycles_gpu(sc)
+        for layer in vfx.layers:
+            if layer.shadow_scene and getattr(layer.shadow_scene.render, "engine", "") == 'CYCLES':
+                optimize_shadow_scene_cycles(layer.shadow_scene, samples=getattr(layer, 'shadow_samples', 8))
 
         for sc in scenes:
             is_fog_sc = (sc.name == "VFX_FOGMAP" or sc == getattr(vfx, "fog_map_scene", None))
@@ -1379,14 +1451,89 @@ class VFX_OT_one_click_exr_single(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class VFX_OT_create_background(bpy.types.Operator):
-    bl_idname = "vfx.create_background"
-    bl_label = "Bake Background (world only)"
+class VFX_OT_add_background(bpy.types.Operator):
+    bl_idname = "vfx.add_background"
+    bl_label = "Добавить слой фона"
+    bl_description = "Добавить фоновый слой (видео, картинка, Movie Clip или 3D сцена) под всеми слоями"
+    bl_options = {'REGISTER', 'UNDO'}
+
     def execute(self, context):
         vfx, master = get_project(context, allow_write=True)
-        if vfx.bg_scene:
-            self.report({'WARNING'}, "Background already exists")
+        vfx.use_bg = True
+        vfx.bg_expanded = True
+        # If project has a movie clip loaded and no clip chosen, default to it
+        if not vfx.bg_movie_clip and bpy.data.movieclips:
+            vfx.bg_movie_clip = bpy.data.movieclips[0]
+            vfx.bg_source_type = 'MOVIE_CLIP'
+        _trigger_comp(context)
+        self.report({'INFO'}, "Фоновый слой добавлен (задник)")
+        return {'FINISHED'}
+
+
+class VFX_OT_browse_bg_file(bpy.types.Operator):
+    bl_idname = "vfx.browse_bg_file"
+    bl_label = "Выбрать файл фона"
+    bl_description = "Выбрать видеофайл или изображение для задника"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    filepath: StringProperty(
+        name="Файл",
+        subtype='FILE_PATH'
+    )
+    file_type: EnumProperty(
+        name="Тип",
+        items=(
+            ('VIDEO', "Видео", ""),
+            ('IMAGE', "Картинка", ""),
+        ),
+        default='VIDEO'
+    )
+
+    def invoke(self, context, event):
+        vfx, master = get_project(context, allow_write=False)
+        curr = vfx.bg_video_path if self.file_type == 'VIDEO' else vfx.bg_image_path
+        if curr:
+            p = bpy.path.abspath(curr)
+            self.filepath = p
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=True)
+        if not self.filepath:
             return {'CANCELLED'}
+        vfx.use_bg = True
+        if self.file_type == 'VIDEO':
+            vfx.bg_video_path = self.filepath
+            vfx.bg_source_type = 'VIDEO'
+            ext = os.path.splitext(self.filepath)[1].lower()
+            if ext in ('.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v'):
+                try:
+                    clip = bpy.data.movieclips.load(self.filepath, check_existing=True)
+                    vfx.bg_movie_clip = clip
+                except Exception:
+                    pass
+        else:
+            vfx.bg_image_path = self.filepath
+            vfx.bg_source_type = 'IMAGE'
+        _trigger_comp(context)
+        self.report({'INFO'}, f"Фон установлен: {os.path.basename(self.filepath)}")
+        return {'FINISHED'}
+
+
+class VFX_OT_create_background(bpy.types.Operator):
+    bl_idname = "vfx.create_background"
+    bl_label = "Создать 3D сцену фона (World Only)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=True)
+        vfx.use_bg = True
+        vfx.bg_source_type = 'SCENE'
+        if vfx.bg_scene:
+            _trigger_comp(context)
+            self.report({'INFO'}, "3D сцена фона уже существует")
+            return {'FINISHED'}
         scene = create_empty_scene("VFX_BG", master)
         scene["vfx_pass"] = "BACKGROUND"
         scene.vfx.master_scene = master
@@ -1409,25 +1556,33 @@ class VFX_OT_create_background(bpy.types.Operator):
         except Exception:
             pass
         vfx.bg_scene = scene
-        rebuild_comp_from_files(vfx, master)
-        self.report({'INFO'}, "Background scene created: VFX_BG")
+        rebuild_comp(vfx, master)
+        self.report({'INFO'}, "Создана 3D сцена фона: VFX_BG")
         return {'FINISHED'}
 
 
 class VFX_OT_delete_background(bpy.types.Operator):
     bl_idname = "vfx.delete_background"
-    bl_label = "Delete Background"
+    bl_label = "Удалить фон"
+    bl_options = {'REGISTER', 'UNDO'}
+
     def execute(self, context):
         vfx, master = get_project(context, allow_write=True)
-        if not vfx.bg_scene:
-            return {'CANCELLED'}
-        remove_comp_node(master, "VFX_RL_BG")
-        sc = vfx.bg_scene
-        vfx.bg_scene = None
-        if sc and sc != master:
-            remove_scene_safe(context, sc, master)
+        vfx.use_bg = False
+        nt = get_comp_tree(master, create=False)
+        if nt:
+            try:
+                from .compositor import _cleanup_bg_nodes
+                _cleanup_bg_nodes(nt)
+            except Exception:
+                pass
+        sc = getattr(vfx, "bg_scene", None)
+        if sc:
+            vfx.bg_scene = None
+            if sc != master:
+                remove_scene_safe(context, sc, master)
         rebuild_comp(vfx, master)
-        self.report({'INFO'}, "Background removed")
+        self.report({'INFO'}, "Фоновый слой удален")
         return {'FINISHED'}
 
 
@@ -1442,6 +1597,8 @@ class VFX_OT_delete_shadow_pass(bpy.types.Operator):
             self.report({'WARNING'}, "No shadow pass on active layer")
             return {'CANCELLED'}
         remove_comp_node(master, f"VFX_RL_{layer.id}_SHD")
+        remove_comp_node(master, f"VFX_SHD_RAMP_{layer.id}")
+        remove_comp_node(master, f"VFX_SHD_BLUR_{layer.id}")
         if layer.shadow_scene and layer.shadow_scene != master:
             remove_scene_safe(context, layer.shadow_scene, master)
         remove_shadow_collections(layer)
@@ -1454,14 +1611,67 @@ class VFX_OT_delete_shadow_pass(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class VFX_OT_focus_shadow_ramp(bpy.types.Operator):
+    bl_idname = "vfx.focus_shadow_ramp"
+    bl_label = "Focus Shadow ColorRamp"
+    bl_description = "Выделить и открыть ноду ColorRamp для этой тени в окне Compositor"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    layer_id: StringProperty(name="Layer ID", default="")
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=True)
+        layer = None
+        if self.layer_id:
+            layer = next((l for l in vfx.layers if l.id == self.layer_id), None)
+        if not layer:
+            layer = active_layer(vfx)
+        if not layer:
+            self.report({'WARNING'}, "Нет активного слоя")
+            return {'CANCELLED'}
+
+        rebuild_comp(vfx, master)
+        nt = get_comp_tree(master)
+        if not nt:
+            self.report({'WARNING'}, "Дерево композитора не найдено")
+            return {'CANCELLED'}
+
+        ramp_name = f"VFX_SHD_RAMP_{layer.id}"
+        ramp = nt.nodes.get(ramp_name)
+        if not ramp:
+            self.report({'WARNING'}, f"Нода {ramp_name} не найдена. Убедитесь, что ColorRamp включен.")
+            return {'CANCELLED'}
+
+        for n in nt.nodes:
+            n.select = False
+        ramp.select = True
+        nt.nodes.active = ramp
+
+        for area in context.screen.areas:
+            if area.type == 'NODE_EDITOR':
+                for space in area.spaces:
+                    if space.type == 'NODE_EDITOR':
+                        try:
+                            space.tree_type = 'CompositorNodeTree'
+                            space.node_tree = nt
+                        except Exception:
+                            pass
+                break
+
+        self.report({'INFO'}, f"ColorRamp для '{layer.layer_name}' выделен в Compositor")
+        return {'FINISHED'}
+
+
 def auto_sync_settings(vfx, master):
     try:
         root = ensure_root(master)
+        ccol = ensure_camera_collection(master, root)
+        link_camera_to_all_scenes(vfx, ccol)
         lcol = ensure_light_collection(master, root)
         sync_master_lights(master, root)
         link_lights_to_all_scenes(vfx, lcol)
     except Exception as e:
-        print("VFX auto_sync_settings lights error:", e)
+        print("VFX auto_sync_settings lights/camera error:", e)
 
     for layer in vfx.layers:
         if layer.scene:
@@ -1488,6 +1698,56 @@ def auto_sync_settings(vfx, master):
             bg.render.film_transparent = False
         except Exception:
             pass
+
+
+class VFX_OT_match_scene_fps(bpy.types.Operator):
+    bl_idname = "vfx.match_scene_fps"
+    bl_label = "Синхронизировать FPS с видео"
+    bl_description = "Выставить FPS проекта и всех слоев в точное соответствие с исходным видео, чтобы исключить рассинхрон и тряску"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=True)
+        clip = getattr(vfx, "bg_movie_clip", None)
+        if clip is None and bpy.data.movieclips:
+            for mc in bpy.data.movieclips:
+                if "matte" not in mc.name.lower() and mc.fps > 0:
+                    clip = mc
+                    break
+            if clip is None:
+                clip = bpy.data.movieclips[0]
+        if clip and clip.fps > 0:
+            target_fps = clip.fps
+            master.render.fps = round(target_fps)
+            master.render.fps_base = round(target_fps) / target_fps if target_fps != round(target_fps) else 1.0
+            auto_sync_settings(vfx, master)
+            self.report({'INFO'}, f"FPS проекта синхронизирован: {target_fps} fps (как у {clip.name})")
+            return {'FINISHED'}
+        self.report({'WARNING'}, "Клип с известным FPS не найден")
+        return {'CANCELLED'}
+
+
+class VFX_OT_match_frame_start(bpy.types.Operator):
+    bl_idname = "vfx.match_frame_start"
+    bl_label = "Выставить старт сцены с 1 кадра"
+    bl_description = "Выставить frame_start=1 для проекта и всех слоев, чтобы трекинг камеры и видео совпадали"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=True)
+        clip = getattr(vfx, "bg_movie_clip", None)
+        if clip is None and bpy.data.movieclips:
+            for mc in bpy.data.movieclips:
+                if "matte" not in mc.name.lower():
+                    clip = mc
+                    break
+            if clip is None:
+                clip = bpy.data.movieclips[0]
+        st = clip.frame_start if clip else 1
+        master.frame_start = st
+        auto_sync_settings(vfx, master)
+        self.report({'INFO'}, f"Frame start проекта установлен в {st}")
+        return {'FINISHED'}
 
 
 class VFX_OT_refresh_proxies(bpy.types.Operator):
@@ -1541,17 +1801,26 @@ class VFX_OT_rebuild_comp(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
     def execute(self, context):
         import traceback
+        import importlib
+        try:
+            from . import compositor
+            importlib.reload(compositor)
+        except Exception:
+            pass
         vfx, master = get_project(context, allow_write=True)
         try:
             if getattr(vfx, "comp_mode", 'LIVE') == 'FILES':
+                from .compositor import rebuild_comp_from_files
                 rebuild_comp_from_files(vfx, master)
                 self.report({'INFO'}, "Comp rebuilt from EXR files")
             else:
+                from .compositor import rebuild_comp
                 rebuild_comp(vfx, master)
                 self.report({'INFO'}, "VFX compositing nodes rebuilt")
         except Exception as e:
             print("VFX rebuild error:", e)
             traceback.print_exc()
+            self.report({'ERROR'}, f"Ошибка пересборки: {e}")
         return {'FINISHED'}
 
 
@@ -1969,4 +2238,342 @@ class VFX_OT_open_output_folder(bpy.types.Operator):
             self.report({'ERROR'}, f"Не удалось открыть папку: {e}")
             return {'CANCELLED'}
 
+        return {'FINISHED'}
+
+
+# -------------------------------------------------------------------------
+# AI SHADOW & COMFYUI OPERATORS
+# -------------------------------------------------------------------------
+
+class VFX_OT_comfy_test_connection(bpy.types.Operator):
+    bl_idname = "vfx.comfy_test_connection"
+    bl_label = "Проверить связь с ComfyUI"
+    bl_description = "Проверить доступность локального REST API сервера ComfyUI"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=True)
+        if not vfx:
+            return {'CANCELLED'}
+        from .ai_shadow import check_comfy_connection
+        ok, msg = check_comfy_connection(vfx.comfy_url)
+        vfx.comfy_status = msg
+        if ok:
+            self.report({'INFO'}, f"ComfyUI: {msg}")
+        else:
+            self.report({'WARNING'}, f"ComfyUI: {msg}")
+        return {'FINISHED'}
+
+
+class VFX_OT_export_comfy_inputs(bpy.types.Operator):
+    bl_idname = "vfx.export_comfy_inputs"
+    bl_label = "Экспорт входных пассов для ComfyUI"
+    bl_description = "Подготовить и открыть папку входных пассов для генерации нейротеней в ComfyUI"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=False)
+        layer = active_layer(vfx)
+        if not vfx or not layer:
+            self.report({'WARNING'}, "Выберите активный слой")
+            return {'CANCELLED'}
+
+        from .ai_shadow import get_comfy_inputs_folder, get_ai_shadow_folder
+        in_folder = get_comfy_inputs_folder(vfx, layer)
+        out_folder = get_ai_shadow_folder(vfx, layer)
+        os.makedirs(in_folder, exist_ok=True)
+        os.makedirs(out_folder, exist_ok=True)
+
+        try:
+            if os.name == 'nt':
+                os.startfile(in_folder)
+            elif sys.platform == 'darwin':
+                subprocess.Popen(['open', in_folder])
+            else:
+                subprocess.Popen(['xdg-open', in_folder])
+            self.report({'INFO'}, f"Папка для ComfyUI подготовлена: {in_folder}")
+        except Exception as e:
+            self.report({'ERROR'}, f"Не удалось открыть папку: {e}")
+            return {'CANCELLED'}
+
+        return {'FINISHED'}
+
+
+class VFX_OT_open_ai_shadow_folder(bpy.types.Operator):
+    bl_idname = "vfx.open_ai_shadow_folder"
+    bl_label = "Открыть папку готовых нейротеней"
+    bl_description = "Открыть папку, куда складываются готовые EXR/PNG кадры теней от ComfyUI"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=False)
+        layer = active_layer(vfx)
+        if not vfx or not layer:
+            self.report({'WARNING'}, "Выберите активный слой")
+            return {'CANCELLED'}
+
+        from .ai_shadow import get_ai_shadow_folder
+        folder = get_ai_shadow_folder(vfx, layer)
+        os.makedirs(folder, exist_ok=True)
+
+        try:
+            if os.name == 'nt':
+                os.startfile(folder)
+            elif sys.platform == 'darwin':
+                subprocess.Popen(['open', folder])
+            else:
+                subprocess.Popen(['xdg-open', folder])
+            self.report({'INFO'}, f"Папка открыта: {folder}")
+        except Exception as e:
+            self.report({'ERROR'}, f"Не удалось открыть папку: {e}")
+            return {'CANCELLED'}
+
+        return {'FINISHED'}
+
+
+# ---------------------------------------------------------------------
+# LAYER HOLDOUT MATTE OPERATORS
+# ---------------------------------------------------------------------
+
+class VFX_OT_browse_layer_matte_folder(bpy.types.Operator):
+    bl_idname = "vfx.browse_layer_matte_folder"
+    bl_label = "Выбрать папку с PNG масками"
+    bl_description = "Выбрать папку с последовательностью PNG файлов для выреза слоя"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    directory: StringProperty(
+        name="Папка с масками",
+        subtype='DIR_PATH',
+    )
+    layer_id: StringProperty(
+        name="ID слоя",
+        default=""
+    )
+
+    def invoke(self, context, event):
+        vfx, master = get_project(context, allow_write=False)
+        layer = active_layer(vfx)
+        if self.layer_id and vfx:
+            l = next((x for x in vfx.layers if x.id == self.layer_id), None)
+            if l:
+                layer = l
+        if layer and layer.holdout_matte_path:
+            p = bpy.path.abspath(layer.holdout_matte_path)
+            self.directory = p if os.path.isdir(p) else os.path.dirname(p)
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=False)
+        layer = active_layer(vfx)
+        if self.layer_id and vfx:
+            l = next((x for x in vfx.layers if x.id == self.layer_id), None)
+            if l:
+                layer = l
+        if not layer:
+            self.report({'WARNING'}, "Слой не выбран")
+            return {'CANCELLED'}
+
+        if not self.directory:
+            return {'CANCELLED'}
+
+        layer.holdout_matte_path = self.directory
+        layer.use_holdout_matte = True
+        _trigger_comp(context)
+        self.report({'INFO'}, f"Маска подключена к слою '{layer.layer_name}': {self.directory}")
+        return {'FINISHED'}
+
+
+class VFX_OT_reload_layer_mask(bpy.types.Operator):
+    bl_idname = "vfx.reload_layer_mask"
+    bl_label = "Обновить маску слоя"
+    bl_description = "Перезагрузить файлы PNG-маски с диска и обновить композитор"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    layer_id: StringProperty(default="")
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=False)
+        layer = active_layer(vfx)
+        if self.layer_id and vfx:
+            l = next((x for x in vfx.layers if x.id == self.layer_id), None)
+            if l:
+                layer = l
+        if not layer:
+            self.report({'WARNING'}, "Слой не выбран")
+            return {'CANCELLED'}
+
+        img_name = f"VFX_MATTE_SEQ_{layer.id}"
+        img = bpy.data.images.get(img_name)
+        if img:
+            try:
+                img.reload()
+            except Exception:
+                pass
+        try:
+            import importlib
+            from . import compositor
+            importlib.reload(compositor)
+        except Exception:
+            pass
+        _trigger_comp(context)
+        self.report({'INFO'}, f"Маска слоя '{layer.layer_name}' обновлена")
+        return {'FINISHED'}
+
+
+class VFX_OT_open_layer_matte_folder(bpy.types.Operator):
+    bl_idname = "vfx.open_layer_matte_folder"
+    bl_label = "Открыть папку масок"
+    bl_description = "Открыть папку с PNG-масками в проводнике Windows"
+    bl_options = {'REGISTER'}
+
+    layer_id: StringProperty(default="")
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=False)
+        layer = active_layer(vfx)
+        if self.layer_id and vfx:
+            l = next((x for x in vfx.layers if x.id == self.layer_id), None)
+            if l:
+                layer = l
+        if not layer or not layer.holdout_matte_path:
+            self.report({'WARNING'}, "Папка маски не указана")
+            return {'CANCELLED'}
+
+        abs_p = bpy.path.abspath(layer.holdout_matte_path)
+        folder = abs_p if os.path.isdir(abs_p) else os.path.dirname(abs_p)
+        if not os.path.exists(folder):
+            self.report({'ERROR'}, f"Папка не существует: {folder}")
+            return {'CANCELLED'}
+
+        try:
+            if os.name == 'nt':
+                os.startfile(folder)
+            elif sys.platform == 'darwin':
+                subprocess.Popen(['open', folder])
+            else:
+                subprocess.Popen(['xdg-open', folder])
+            self.report({'INFO'}, f"Папка открыта: {folder}")
+        except Exception as e:
+            self.report({'ERROR'}, f"Не удалось открыть: {e}")
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+
+def _get_vfx_layer_items(self, context):
+    vfx, master = get_project(context, allow_write=False)
+    if not vfx or not vfx.layers:
+        return [('NONE', "Нет слоев", "")]
+    return [(l.id, l.layer_name, f"Слой '{l.layer_name}'") for l in vfx.layers]
+
+
+class VFX_OT_assign_layer_mask_dialog(bpy.types.Operator):
+    bl_idname = "vfx.assign_layer_mask_dialog"
+    bl_label = "Применить маску выреза к слою"
+    bl_description = "Выбрать слой и применить к нему внешнюю PNG-маску из папки (вычитание/holdout)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    target_layer_id: EnumProperty(
+        name="Целевой 3D-слой",
+        items=_get_vfx_layer_items,
+        description="Слой, из которого будет вычитаться маска"
+    )
+    folder_path: StringProperty(
+        name="Папка с PNG",
+        description="Папка, содержащая набор PNG кадров маски",
+        subtype='DIR_PATH'
+    )
+    invert: BoolProperty(
+        name="Инвертировать (белое оставляет)",
+        description="По умолчанию белое вырезает 3D слой, черное оставляет. При инверсии наоборот.",
+        default=False
+    )
+    mode: EnumProperty(
+        name="Канал маски",
+        items=(
+            ('LUMA', "Яркость (RGB / ч/б)", "Маска по яркости"),
+            ('ALPHA', "Альфа (PNG Alpha)", "Маска по альфа-каналу"),
+        ),
+        default='LUMA'
+    )
+    feather: FloatProperty(
+        name="Смягчение (px)",
+        default=0.0,
+        min=0.0,
+        max=100.0
+    )
+    choke: IntProperty(
+        name="Сжатие маски (px)",
+        description="Сжатие (отрицательные значения, e.g. -3 px) или расширение маски",
+        default=-2,
+        min=-100,
+        max=100
+    )
+    frame_start: IntProperty(
+        name="Старт маски",
+        description="Номер кадра сцены, с которого начинается маска",
+        default=1,
+        min=-10000,
+        max=10000
+    )
+    frame_offset: IntProperty(
+        name="Сдвиг кадров",
+        description="Смещение кадров маски относительно таймлайна",
+        default=0,
+        min=-1000,
+        max=1000
+    )
+
+    def invoke(self, context, event):
+        vfx, master = get_project(context, allow_write=False)
+        layer = active_layer(vfx)
+        if layer and hasattr(self, "target_layer_id"):
+            self.target_layer_id = layer.id
+            if layer.holdout_matte_path:
+                self.folder_path = layer.holdout_matte_path
+            self.invert = layer.holdout_matte_invert
+            self.mode = layer.holdout_matte_mode
+            self.feather = layer.holdout_matte_feather
+            self.choke = layer.holdout_matte_choke
+            self.frame_start = layer.holdout_matte_frame_start
+            self.frame_offset = layer.holdout_matte_frame_offset
+        return context.window_manager.invoke_props_dialog(self, width=420)
+
+    def draw(self, context):
+        layout = self.layout
+        col = layout.column(align=True)
+        col.prop(self, "target_layer_id")
+        col.prop(self, "folder_path")
+        col.separator()
+        row_s = col.row(align=True)
+        row_s.prop(self, "frame_start", text="Старт")
+        row_s.prop(self, "frame_offset", text="Сдвиг кадров")
+        col.separator()
+        col.prop(self, "mode")
+        col.prop(self, "invert")
+        row_e = col.row(align=True)
+        row_e.prop(self, "choke", text="Сжатие (px)")
+        row_e.prop(self, "feather", text="Смягчение (px)")
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=False)
+        if not vfx:
+            return {'CANCELLED'}
+        layer = next((l for l in vfx.layers if l.id == self.target_layer_id), None)
+        if not layer:
+            self.report({'WARNING'}, "Целевой слой не найден")
+            return {'CANCELLED'}
+
+        layer.use_holdout_matte = True
+        if self.folder_path:
+            layer.holdout_matte_path = self.folder_path
+        layer.holdout_matte_invert = self.invert
+        layer.holdout_matte_mode = self.mode
+        layer.holdout_matte_feather = self.feather
+        layer.holdout_matte_choke = self.choke
+        layer.holdout_matte_frame_start = self.frame_start
+        layer.holdout_matte_frame_offset = self.frame_offset
+
+        _trigger_comp(context)
+        self.report({'INFO'}, f"Маска успешно применена к слою '{layer.layer_name}'")
         return {'FINISHED'}

@@ -7,6 +7,7 @@ from . import VFX_VERSION
 from .core import get_project, active_layer
 from .materials import _last_adjust_stats
 from .occlusion import compute_composite_order, _camera_distance
+from .compositor import get_matte_sequence_info
 
 
 def _get_rendered_frames_badge(scene, vfx, master, is_static=False):
@@ -75,6 +76,11 @@ class VFX_UL_layers(bpy.types.UIList):
             badge_sub.alignment = 'RIGHT'
             badge_sub.label(text=b_text, icon=b_icon)
 
+        if getattr(item, "use_holdout_matte", False):
+            m_badge = row.row(align=True)
+            m_badge.alignment = 'RIGHT'
+            m_badge.label(text="", icon='MOD_MASK')
+
         sel_btn = row.operator(
             "vfx.select_layer_objects",
             text="",
@@ -133,7 +139,10 @@ def _draw_layer_list(context, layout):
     vfx, master = get_project(context, allow_write=False)
 
     layout.operator_context = 'INVOKE_DEFAULT'
-    layout.operator("vfx.create_layer", icon='ADD')
+    top_row = layout.row(align=True)
+    top_row.operator("vfx.create_layer", text="Слой", icon='ADD')
+    top_row.operator("vfx.add_background", text="Задник", icon='IMAGE_BACKGROUND')
+    top_row.operator("vfx.assign_layer_mask_dialog", text="Маска...", icon='MOD_MASK')
     layout.operator("vfx.add_selected_lights", text="Add Selected Lights", icon='LIGHT')
 
     layout.template_list(
@@ -145,30 +154,86 @@ def _draw_layer_list(context, layout):
         "active_layer_index"
     )
 
-    # background strip
-    if vfx.bg_scene is not None:
-        bgbox = layout.box()
-        r = bgbox.row(align=True)
-        r.label(text="", icon='WORLD')
-        r.label(text="BACKGROUND (bottom)")
-        rbg = r.operator(
-            "vfx.render_all_layers",
-            text="",
-            icon='RENDER_STILL',
-            emboss=False
-        )
-        rbg.only_background = True
-        rbg.refresh_after = True
-        r.operator("vfx.delete_background", text="", icon='X')
-
-        b_st = bgbox.row(align=True)
-        b_st.prop(vfx, "bg_is_static", text="Static (1 Frame)", icon='IMAGE_DATA')
-        if vfx.bg_is_static:
-            b_st.prop(vfx, "bg_static_frame", text="Frame")
-
     row = layout.row(align=True)
     row.operator("vfx.move_layer_up", icon='TRIA_UP', text="Up / Forward")
     row.operator("vfx.move_layer_down", icon='TRIA_DOWN', text="Down / Back")
+
+    # background strip
+    has_bg = getattr(vfx, "use_bg", False) or (vfx.bg_scene is not None)
+    if has_bg:
+        bgbox = layout.box()
+        r = bgbox.row(align=True)
+        is_exp = getattr(vfx, "bg_expanded", True)
+        r.prop(vfx, "bg_expanded", text="", icon='TRIA_DOWN' if is_exp else 'TRIA_RIGHT', emboss=False)
+        r.prop(vfx, "use_bg", text="ЗАДНИК (Фон)", icon='IMAGE_BACKGROUND')
+        if getattr(vfx, "bg_source_type", 'VIDEO') == 'SCENE' and vfx.bg_scene is not None:
+            rbg = r.operator("vfx.render_all_layers", text="", icon='RENDER_STILL', emboss=False)
+            rbg.only_background = True
+            rbg.refresh_after = True
+        r.operator("vfx.rebuild_comp", text="", icon='FILE_REFRESH', emboss=False)
+        r.operator("vfx.delete_background", text="", icon='X', emboss=False)
+
+        if is_exp:
+            col = bgbox.column(align=True)
+            src_row = col.row(align=True)
+            src_row.prop(vfx, "bg_source_type", expand=True)
+
+            st = getattr(vfx, "bg_source_type", 'VIDEO')
+            if st == 'VIDEO':
+                v_row = col.row(align=True)
+                v_row.prop(vfx, "bg_video_path", text="Видео")
+                op = v_row.operator("vfx.browse_bg_file", text="", icon='FILE_FOLDER')
+                op.file_type = 'VIDEO'
+                f_row = col.row(align=True)
+                f_row.prop(vfx, "bg_fit_mode", text="Размер")
+
+            elif st == 'IMAGE':
+                i_row = col.row(align=True)
+                i_row.prop(vfx, "bg_image_path", text="Кадр")
+                op = i_row.operator("vfx.browse_bg_file", text="", icon='FILE_FOLDER')
+                op.file_type = 'IMAGE'
+                f_row = col.row(align=True)
+                f_row.prop(vfx, "bg_fit_mode", text="Размер")
+
+            elif st == 'MOVIE_CLIP':
+                c_row = col.row(align=True)
+                c_row.prop(vfx, "bg_movie_clip", text="Клип")
+                f_row = col.row(align=True)
+                f_row.prop(vfx, "bg_fit_mode", text="Размер")
+
+            elif st == 'SCENE':
+                s_row = col.row(align=True)
+                s_row.prop(vfx, "bg_scene", text="3D Сцена")
+                if not vfx.bg_scene:
+                    s_row.operator("vfx.create_background", text="Создать сцену", icon='ADD')
+                st_row = col.row(align=True)
+                st_row.prop(vfx, "bg_is_static", text="Статика (1 кадр)", icon='IMAGE_DATA')
+                if vfx.bg_is_static:
+                    st_row.prop(vfx, "bg_static_frame", text="Кадр")
+
+            # Diagnostics: Check FPS mismatch and frame start
+            active_clip = getattr(vfx, "bg_movie_clip", None)
+            if active_clip is None and bpy.data.movieclips:
+                for mc in bpy.data.movieclips:
+                    if "matte" not in mc.name.lower() and mc.fps > 0:
+                        active_clip = mc
+                        break
+            if active_clip and active_clip.fps > 0:
+                sc_fps = context.scene.render.fps / (context.scene.render.fps_base or 1.0)
+                if abs(active_clip.fps - sc_fps) > 0.05:
+                    wbox = col.box()
+                    wbox.alert = True
+                    w_r = wbox.row()
+                    w_r.label(text=f"Рассинхрон FPS! Проект: {sc_fps:.1f}, Клип: {active_clip.fps:.1f} fps", icon='ERROR')
+                    w_b = wbox.row()
+                    w_b.operator("vfx.match_scene_fps", text=f"Синхронизировать FPS ({active_clip.fps:.2f})", icon='TIME')
+            if active_clip and active_clip.frame_start > context.scene.frame_start:
+                sbox = col.box()
+                s_r = sbox.row()
+                s_r.label(text=f"Кадр 0 пустой: клип с {active_clip.frame_start}, проект с {context.scene.frame_start}", icon='INFO')
+                sbox.operator("vfx.match_frame_start", text=f"Поставить старт сцены на {active_clip.frame_start} кадр", icon='PLAY')
+    else:
+        layout.operator("vfx.add_background", text="+ Добавить слой фона (задник)", icon='IMAGE_BACKGROUND')
 
     layer = active_layer(vfx)
 
@@ -193,16 +258,56 @@ def _draw_layer_list(context, layout):
         if vfx.show_hints and layer.is_static:
             box.label(text="Рендерит только 1 кадр и удерживает его на всю анимацию (для Луны/фонов)", icon='HELP')
 
-        # Shadow catcher and pass
-        box.prop(layer, "shadow_catcher", text="Кетчер тени")
+        # ── 3D SHADOW PASS & FILTER ──
+        sbox = box.box()
+        shead = sbox.row(align=True)
+        shead.prop(layer, "shadow_expanded", text="",
+                   icon='TRIA_DOWN' if layer.shadow_expanded else 'TRIA_RIGHT', emboss=False)
         if not layer.shadow_scene:
-            box.operator("vfx.create_shadow_pass", text="Добавить пасс тени", icon='LIGHT')
+            shead.label(text="3D ТЕНЬ (PASS)", icon='LIGHT')
+            if layer.shadow_catcher:
+                shead.operator("vfx.create_shadow_pass", text="Создать пасс", icon='PLUS')
+            else:
+                shead.operator("vfx.create_shadow_pass", text="Добавить пасс", icon='PLUS')
         else:
-            sh_row = box.row(align=True)
-            sh_row.label(text=f"Тень: {layer.shadow_mode}", icon='CHECKMARK')
-            sh_row.prop(layer, "shadow_strength", text="Сила")
-            sh_row.operator("vfx.refresh_proxies", text="", icon='FILE_REFRESH')
-            sh_row.operator("vfx.delete_shadow_pass", text="", icon='X')
+            shead.label(text=f"3D ТЕНЬ ({layer.shadow_mode})", icon='CHECKMARK')
+            shead.prop(layer, "shadow_strength", text="Сила")
+            shead.operator("vfx.refresh_proxies", text="", icon='FILE_REFRESH', emboss=False)
+            shead.operator("vfx.delete_shadow_pass", text="", icon='X', emboss=False)
+
+        if layer.shadow_expanded:
+            sc = sbox.column(align=True)
+            sc.prop(layer, "shadow_catcher", text="Кетчер тени")
+            if layer.shadow_catcher:
+                b_row = sc.row(align=True)
+                b_row.prop(layer, "shadow_catcher_bounce", text="Подсветка от кетчера (GI Bounce & Reflections)", icon='LIGHT_SUN')
+                if vfx.show_hints and layer.shadow_catcher_bounce:
+                    sc.label(text="Кетчер освещает 3D-объект снизу и отражается в глянцевых материалах.", icon='INFO')
+            if not layer.shadow_scene:
+                if layer.shadow_catcher:
+                    r = sc.row(align=True)
+                    r.alert = True
+                    r.operator("vfx.create_shadow_pass", text="⚠ Нажмите: Создать 3D пасс тени", icon='LIGHT')
+            else:
+                sc.separator()
+                r_main = sc.row(align=True)
+                r_main.prop(layer, "shadow_color", text="Цвет")
+                r_main.prop(layer, "shadow_samples", text="Семплы Cycles")
+
+                r_filter = sc.row(align=True)
+                r_filter.prop(layer, "shadow_use_ramp", text="ColorRamp")
+                r_filter.prop(layer, "shadow_blur", text="Размытие (px)")
+
+                if layer.shadow_use_ramp:
+                    r_ramp = sc.row(align=True)
+                    r_ramp.prop(layer, "shadow_ramp_black", text="Срез (шум)")
+                    r_ramp.prop(layer, "shadow_ramp_white", text="Ядро (плотность)")
+
+                if vfx.show_hints:
+                    sc.label(text="Цвет и ColorRamp меняют оттенок и плотность тени в композиторе без перерендера.", icon='HELP')
+
+                b_row = sc.row(align=True)
+                b_row.operator("vfx.focus_shadow_ramp", text="Открыть ColorRamp в нодах", icon='NODETREE').layer_id = layer.id
 
         # ── OCCLUSION (holdout) ──
         obox = box.box()
@@ -239,6 +344,59 @@ def _draw_layer_list(context, layout):
                 n_prox = sum(1 for o in layer.occlusion_collection.objects
                              if o.get("vfx_proxy"))
             oc.label(text=f"Holdout-прокси: {n_prox}", icon='MOD_MESHDEFORM')
+
+        # ── HOLDOUT MATTE (PNG SEQUENCE CUTOUT) ──
+        mbox = box.box()
+        mhead = mbox.row(align=True)
+        mhead.prop(layer, "holdout_matte_expanded", text="",
+                   icon='TRIA_DOWN' if layer.holdout_matte_expanded else 'TRIA_RIGHT', emboss=False)
+        mhead.prop(layer, "use_holdout_matte", text="")
+        mhead.label(text="МАСКА ВЫРЕЗА (PNG СЕКВЕНЦИЯ)", icon='MOD_MASK')
+        if layer.use_holdout_matte:
+            count, st_f, first_f, status = get_matte_sequence_info(layer.holdout_matte_path)
+            if count > 0:
+                mhead.label(text=f"{count} к.", icon='CHECKMARK')
+
+        if layer.holdout_matte_expanded and layer.use_holdout_matte:
+            mc = mbox.column(align=True)
+            if vfx.show_hints:
+                mc.label(text="Вычитает 3D-слой по внешней PNG-маске (ротоскоп/кеинг из папки):", icon='HELP')
+
+            p_row = mc.row(align=True)
+            p_row.prop(layer, "holdout_matte_path", text="Папка/Файл")
+            p_row.operator("vfx.browse_layer_matte_folder", text="", icon='FILE_FOLDER').layer_id = layer.id
+
+            count, st_f, first_f, status = get_matte_sequence_info(layer.holdout_matte_path)
+            s_row = mc.row(align=True)
+            if count > 0:
+                s_row.label(text=f"{status} (старт: {first_f})", icon='CHECKMARK')
+            else:
+                s_row.label(text=status, icon='ERROR')
+
+            mc.separator()
+            r_sync = mc.row(align=True)
+            r_sync.prop(layer, "holdout_matte_frame_start", text="Старт маски")
+            r_sync.prop(layer, "holdout_matte_frame_offset", text="Сдвиг кадров")
+
+            row_cfg = mc.row(align=True)
+            row_cfg.prop(layer, "holdout_matte_invert", text="Инвертировать")
+            row_cfg.prop(layer, "holdout_matte_mode", text="")
+
+            r_edge = mc.row(align=True)
+            r_edge.prop(layer, "holdout_matte_choke", text="Сжатие (px)")
+            r_edge.prop(layer, "holdout_matte_feather", text="Смягчение (px)")
+
+            if vfx.show_hints:
+                mc.label(text="Отрицательное сжатие (например, -3 px) убирает зазоры вокруг тонких столбов и проводов.", icon='INFO')
+
+            if layer.shadow_scene:
+                mc.prop(layer, "holdout_matte_mask_shadow", text="Вырезать также из тени слоя")
+
+            mc.separator()
+            b_row = mc.row(align=True)
+            b_row.operator("vfx.reload_layer_mask", text="Обновить маску", icon='FILE_REFRESH').layer_id = layer.id
+            if layer.holdout_matte_path:
+                b_row.operator("vfx.open_layer_matte_folder", text="Открыть папку", icon='FOLDER_REDIRECT').layer_id = layer.id
 
         # ── EXTRA LAYER ADJUSTMENTS (Collapsible fine-tuning) ──
         ext_box = box.box()
@@ -572,6 +730,12 @@ def _draw_render_settings(context, layout):
 
     layout.separator()
 
+    cprefs = bpy.context.preferences.addons.get('cycles')
+    if cprefs and hasattr(cprefs, 'preferences') and getattr(cprefs.preferences, 'compute_device_type', 'NONE') == 'NONE':
+        r_gpu = layout.row(align=True)
+        r_gpu.alert = True
+        r_gpu.operator("vfx.enable_gpu_compute", text="⚡ Включить GPU (OptiX) для рендера", icon='LIGHT_SUN')
+
     layout.prop(vfx, "resume_render", icon='RECOVER_LAST')
 
     layout.operator(
@@ -663,6 +827,7 @@ def _draw_render_settings(context, layout):
         btn_still = sub_row.operator("vfx.export_final_video", text="Текущий кадр", icon='IMAGE_DATA')
         btn_still.animation = False
         sub_row.operator("vfx.open_output_folder", text="Открыть папку", icon='FILE_FOLDER')
+
 
 
 # ---------------------------------------------------------------------

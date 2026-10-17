@@ -1,14 +1,14 @@
 bl_info = {
     "name": "VFX Layer Tools",
     "author": "VFX Pipeline",
-    "version": (3, 17, 0),
+    "version": (3, 21, 0),
     "blender": (5, 2, 1),
     "location": "View3D > Sidebar > VFX",
     "description": "VFX layer / scene / compositing manager",
     "category": "Compositing",
 }
 
-VFX_VERSION = "3.17.0"
+VFX_VERSION = "3.21.0"
 
 import bpy
 import importlib
@@ -77,6 +77,37 @@ def _dof_changed(ctx):
     _trigger_comp(ctx)
 
 
+def _on_shadow_catcher_update(layer, context):
+    try:
+        from .core import get_project
+        from .shadow import refresh_shadow_proxies, sync_layer_bounce_proxy
+        vfx, master = get_project(context, allow_write=True)
+        if getattr(layer, "shadow_scene", None):
+            refresh_shadow_proxies(vfx, master)
+        else:
+            sync_layer_bounce_proxy(layer, master)
+    except Exception:
+        pass
+
+
+def _on_shadow_catcher_bounce_update(layer, context):
+    try:
+        from .core import get_project
+        from .shadow import sync_layer_bounce_proxy
+        vfx, master = get_project(context, allow_write=True)
+        sync_layer_bounce_proxy(layer, master)
+    except Exception:
+        pass
+
+
+def _on_shadow_samples_update(layer, context):
+    if getattr(layer, "shadow_scene", None) and hasattr(layer.shadow_scene, "cycles"):
+        try:
+            layer.shadow_scene.cycles.samples = max(1, getattr(layer, "shadow_samples", 8))
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------------
 # ENGINE ITEMS
 # ---------------------------------------------------------------------
@@ -142,6 +173,15 @@ class VFXLayer(bpy.types.PropertyGroup):
     scene: PointerProperty(type=bpy.types.Scene)
 
     use_shadow: BoolProperty(default=False)
+    shadow_tech: EnumProperty(
+        name="Технология тени",
+        items=(
+            ('3D', "3D Catcher (Cycles)", "Классическая честная 3D-тень через Shadow Catcher на геометрии сцены"),
+            ('AI', "Нейротень (ComfyUI)", "Сгенерированная нейросетью реалистичная тень (идеально для 2D-плейнов/персонажей)"),
+        ),
+        default='3D',
+        description="Тип тени: честная 3D тень Cycles или сгенерированная нейросетью AI Shadow"
+    )
     shadow_mode: EnumProperty(
         name="Shadow Mode",
         items=(
@@ -151,10 +191,47 @@ class VFXLayer(bpy.types.PropertyGroup):
         default='CAST'
     )
     shadow_scene: PointerProperty(type=bpy.types.Scene)
-    shadow_catcher: PointerProperty(type=bpy.types.Object)
+    shadow_catcher: PointerProperty(
+        type=bpy.types.Object,
+        name="Shadow Catcher",
+        description="Object that catches shadows from this layer",
+        update=_on_shadow_catcher_update,
+    )
+    shadow_catcher_bounce: BoolProperty(
+        name="Подсветка и рефлексы (GI Bounce)",
+        description="Кетчер освещает 3D-объекты слоя снизу (диффузный отскок света, рефлексы в глянцевых материалах, контактный AO), оставаясь невидимым для камеры",
+        default=True,
+        update=_on_shadow_catcher_bounce_update,
+    )
+    shadow_samples: IntProperty(
+        name="Семплы тени",
+        default=8,
+        min=1,
+        max=4096,
+        description="Количество семплов Cycles для пасса тени (для прямого света и мягкой тени обычно достаточно 3-8)",
+        update=_on_shadow_samples_update,
+    )
+
+    # -- AI Shadow settings --
+    ai_shadow_blend_mode: EnumProperty(
+        name="Режим наложения AI",
+        items=(
+            ('MULTIPLY', "Multiply", "Классическое умножение — сохраняет текстуру подложки и цвет фона"),
+            ('DARKEN', "Darken", "Затемнение — предотвращает излишне глубокую черноту"),
+        ),
+        default='MULTIPLY',
+        update=lambda self, ctx: _trigger_comp(ctx)
+    )
+    ai_shadow_use_depth_clip: BoolProperty(
+        name="Отсекать по глубине (Z)",
+        description="Не накладывать тень поверх объектов, находящихся ближе к камере",
+        default=True,
+        update=lambda self, ctx: _trigger_comp(ctx)
+    )
 
     shadow_cast_collection: PointerProperty(type=bpy.types.Collection)
     shadow_catch_collection: PointerProperty(type=bpy.types.Collection)
+    shadow_bounce_collection: PointerProperty(type=bpy.types.Collection)
 
     use_adjust: BoolProperty(
         name="Adjust Material (viewport)",
@@ -181,6 +258,51 @@ class VFXLayer(bpy.types.PropertyGroup):
         name="Tint", subtype='COLOR', size=4,
         default=(1.0, 1.0, 1.0, 1.0), min=0.0, max=1.0,
         update=lambda self, ctx: _trigger_rebuild(ctx)
+    )
+    shadow_expanded: BoolProperty(
+        name="Настройки тени",
+        description="Развернуть блок тонкой настройки тени (ColorRamp, цвет, срез, размытие)",
+        default=True,
+    )
+    shadow_color: FloatVectorProperty(
+        name="Цвет тени",
+        subtype='COLOR',
+        size=4,
+        default=(0.0, 0.0, 0.0, 1.0),
+        min=0.0,
+        max=1.0,
+        description="Цвет и оттенок тени (позволяет подкрасить тень под цвет окружения/неба)",
+        update=lambda self, ctx: _trigger_comp(ctx),
+    )
+    shadow_use_ramp: BoolProperty(
+        name="ColorRamp",
+        description="Фильтровать тень через ColorRamp (срез шума, плотность ядра, точный цвет)",
+        default=True,
+        update=lambda self, ctx: _trigger_comp(ctx),
+    )
+    shadow_ramp_black: FloatProperty(
+        name="Срез (шум)",
+        description="Отсечение слабой тени и краевого шума (положение черной точки в ColorRamp)",
+        default=0.0,
+        min=0.0,
+        max=0.99,
+        update=lambda self, ctx: _trigger_comp(ctx),
+    )
+    shadow_ramp_white: FloatProperty(
+        name="Ядро (плотность)",
+        description="Плотность ядра тени (положение белой точки в ColorRamp: меньшие значения делают тень темнее и плотнее)",
+        default=1.0,
+        min=0.01,
+        max=1.0,
+        update=lambda self, ctx: _trigger_comp(ctx),
+    )
+    shadow_blur: IntProperty(
+        name="Размытие (px)",
+        description="Быстрое размытие тени в композиторе (смягчение краев без необходимости перерендеривать Cycles с большими углами света)",
+        default=0,
+        min=0,
+        max=100,
+        update=lambda self, ctx: _trigger_comp(ctx),
     )
     shadow_strength: FloatProperty(
         name="Shadow Strength", default=1.0, min=0.0, max=1.0,
@@ -265,6 +387,80 @@ class VFXLayer(bpy.types.PropertyGroup):
         name="Occlusion expanded",
         description="Show occlusion section of this layer",
         default=False,
+    )
+
+    # -- External PNG Holdout Matte (Layer Cutout) --
+    use_holdout_matte: BoolProperty(
+        name="Маска выреза (PNG)",
+        description="Вырезать 3D-слой по внешней PNG-маске / секвенции кадров (ротоскоп / кеинг / matte)",
+        default=False,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    holdout_matte_path: StringProperty(
+        name="Папка / Файл маски",
+        description="Путь к папке с PNG-секвенцией маски или к файлу маски",
+        subtype='FILE_PATH',
+        default="",
+        update=lambda s, c: _trigger_comp(c)
+    )
+    holdout_matte_invert: BoolProperty(
+        name="Инвертировать маску",
+        description="Инвертировать: по умолчанию белые участки (1.0) вырезают 3D-слой, черные (0.0) оставляют видимым",
+        default=False,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    holdout_matte_mode: EnumProperty(
+        name="Канал маски",
+        items=(
+            ('LUMA', "Яркость (RGB / ч/б)", "Использовать яркость (Luma) изображения как маску выреза"),
+            ('ALPHA', "Альфа (PNG Alpha)", "Использовать альфа-канал PNG как маску выреза"),
+        ),
+        default='LUMA',
+        description="Откуда брать маску выреза",
+        update=lambda s, c: _trigger_comp(c)
+    )
+    holdout_matte_feather: FloatProperty(
+        name="Смягчение (px)",
+        description="Размытие / смягчение краев маски выреза в пикселях",
+        default=0.0,
+        min=0.0,
+        max=100.0,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    holdout_matte_choke: IntProperty(
+        name="Сжатие маски (px)",
+        description="Сжатие (отрицательные значения, например -2 px) или расширение (положительные значения) маски выреза в пикселях",
+        default=-2,
+        min=-100,
+        max=100,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    holdout_matte_frame_start: IntProperty(
+        name="Старт маски",
+        description="Номер кадра сцены, с которого начинается воспроизведение маски (по умолчанию 1)",
+        default=1,
+        min=-10000,
+        max=10000,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    holdout_matte_frame_offset: IntProperty(
+        name="Сдвиг кадров",
+        description="Смещение кадров маски относительно таймлайна (например, +1 или -1 кадр для синхронизации)",
+        default=0,
+        min=-1000,
+        max=1000,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    holdout_matte_mask_shadow: BoolProperty(
+        name="Вырезать также из тени",
+        description="Применять маску выреза не только к объектам слоя, но и к пассу его тени (SHD)",
+        default=True,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    holdout_matte_expanded: BoolProperty(
+        name="Развернуть маску",
+        description="Развернуть блок настроек внешней маски выреза",
+        default=True
     )
     extra_settings_expanded: BoolProperty(
         name="Extra Layer Adjustments",
@@ -447,6 +643,81 @@ class VFXProject(bpy.types.PropertyGroup):
     final_speedup: BoolProperty(
         name="Турбо-сборка (Workbench)",
         description="Временно собирает кадры через быстрый Workbench (0.1–0.2с на кадр), минуя повторный 3D-просчет сцены",
+        default=True
+    )
+    # -- ComfyUI AI Shadow Pipeline --
+    ai_shadow_expanded: BoolProperty(
+        name="Нейросети & ComfyUI (Тени)",
+        description="Развернуть блок настроек генерации теней через ComfyUI",
+        default=True
+    )
+    comfy_url: StringProperty(
+        name="ComfyUI URL",
+        description="Адрес локального сервера ComfyUI REST API",
+        default="http://127.0.0.1:8188"
+    )
+    comfy_workflow_file: StringProperty(
+        name="Воркфлоу (JSON)",
+        description="Путь к файлу workflow API (экспортированному из ComfyUI в формате API JSON)",
+        default="",
+        subtype='FILE_PATH'
+    )
+    comfy_status: StringProperty(
+        name="Статус ComfyUI",
+        default=""
+    )
+    use_bg: BoolProperty(
+        name="Использовать фон",
+        description="Включить фоновый слой (видео, картинка, Movie Clip или 3D-рендер), расположенный под всеми слоями",
+        default=False,
+        update=lambda s, c: _trigger_comp(c)
+    )
+    bg_source_type: EnumProperty(
+        name="Тип фона",
+        description="Источник для фонового слоя (задника)",
+        items=(
+            ('VIDEO', "Видео / Секвенция", "Видеофайл (.mp4, .mov...) или папка секвенции кадров", 'FILE_MOVIE', 0),
+            ('IMAGE', "Картинка", "Одиночное статичное изображение (.png, .jpg, .exr...)", 'FILE_IMAGE', 1),
+            ('MOVIE_CLIP', "Movie Clip", "Клип из Blender Movie Clip Editor (трекинг)", 'TRACKER', 2),
+            ('SCENE', "3D Рендер", "3D-сцена задника (мир, небо, окружение)", 'SCENE_DATA', 3),
+        ),
+        default='VIDEO',
+        update=lambda s, c: _trigger_comp(c)
+    )
+    bg_video_path: StringProperty(
+        name="Видео / Секвенция",
+        description="Путь к видеофайлу (.mp4, .mov...) или папке секвенции",
+        subtype='FILE_PATH',
+        default="",
+        update=lambda s, c: _trigger_comp(c)
+    )
+    bg_image_path: StringProperty(
+        name="Файл картинки",
+        description="Путь к статичному изображению фона (.png, .jpg, .exr...)",
+        subtype='FILE_PATH',
+        default="",
+        update=lambda s, c: _trigger_comp(c)
+    )
+    bg_movie_clip: PointerProperty(
+        type=bpy.types.MovieClip,
+        name="Movie Clip",
+        description="Выбрать Movie Clip из проекта Blender",
+        update=lambda s, c: _trigger_comp(c)
+    )
+    bg_fit_mode: EnumProperty(
+        name="Масштаб фона",
+        description="Масштабирование фона под разрешение рендера",
+        items=(
+            ('STRETCH', "Растянуть (Stretch)", "Растянуть под пропорции кадра холста", 0),
+            ('FIT', "Вписать (Fit)", "Вписать с сохранением пропорций (черные полосы по краям)", 1),
+            ('CROP', "Заполнить (Crop)", "Заполнить кадр с обрезкой краев", 2),
+        ),
+        default='STRETCH',
+        update=lambda s, c: _trigger_comp(c)
+    )
+    bg_expanded: BoolProperty(
+        name="Развернуть настройки фона",
+        description="Развернуть блок настроек фона",
         default=True
     )
     bg_scene: PointerProperty(
@@ -914,7 +1185,7 @@ from .materials import _last_adjust_stats
 from .operators import (
     VFX_OT_set_master, VFX_OT_create_layer,
     VFX_OT_add_selected_to_layer, VFX_OT_remove_selected_from_layer,
-    VFX_OT_add_selected_lights, VFX_OT_create_shadow_pass,
+    VFX_OT_add_selected_lights, VFX_OT_create_shadow_pass, VFX_OT_enable_gpu_compute,
     VFX_OT_delete_layer, VFX_OT_rename_layer, VFX_OT_reset_lighting,
     VFX_OT_toggle_layer_expand, VFX_OT_toggle_fog_expand,
     VFX_OT_drag_layer, VFX_OT_move_layer_up, VFX_OT_move_layer_down,
@@ -923,6 +1194,7 @@ from .operators import (
     VFX_OT_one_click_exr_single, VFX_OT_render_fog_map, VFX_OT_stop_render,
     VFX_OT_create_background, VFX_OT_delete_background,
     VFX_OT_delete_shadow_pass, VFX_OT_refresh_proxies,
+    VFX_OT_focus_shadow_ramp,
     VFX_OT_refresh_occlusion,
     VFX_OT_diagnostic,
     VFX_OT_setup_light_groups, VFX_OT_apply_color_preset,
@@ -931,6 +1203,12 @@ from .operators import (
     VFX_OT_copy_master_grade, VFX_OT_toggle_viewport_compositor,
     VFX_OT_select_layer_objects,
     VFX_OT_export_final_video, VFX_OT_open_output_folder,
+    VFX_OT_comfy_test_connection, VFX_OT_export_comfy_inputs,
+    VFX_OT_open_ai_shadow_folder,
+    VFX_OT_browse_layer_matte_folder, VFX_OT_reload_layer_mask,
+    VFX_OT_open_layer_matte_folder, VFX_OT_assign_layer_mask_dialog,
+    VFX_OT_add_background, VFX_OT_browse_bg_file,
+    VFX_OT_match_scene_fps, VFX_OT_match_frame_start,
 )
 from .ui import (
     VFX_UL_layers, VFX_PT_main, VFX_PT_post_effects,
@@ -960,6 +1238,7 @@ classes = (
     VFX_OT_select_layer_objects,
     VFX_OT_add_selected_lights,
     VFX_OT_create_shadow_pass,
+    VFX_OT_enable_gpu_compute,
     VFX_OT_delete_layer,
     VFX_OT_rename_layer,
     VFX_OT_reset_lighting,
@@ -979,6 +1258,7 @@ classes = (
     VFX_OT_delete_background,
     VFX_OT_delete_shadow_pass,
     VFX_OT_refresh_proxies,
+    VFX_OT_focus_shadow_ramp,
     VFX_OT_refresh_occlusion,
     VFX_OT_diagnostic,
     VFX_OT_apply_color_preset,
@@ -989,6 +1269,17 @@ classes = (
     VFX_OT_toggle_viewport_compositor,
     VFX_OT_export_final_video,
     VFX_OT_open_output_folder,
+    VFX_OT_comfy_test_connection,
+    VFX_OT_export_comfy_inputs,
+    VFX_OT_open_ai_shadow_folder,
+    VFX_OT_browse_layer_matte_folder,
+    VFX_OT_reload_layer_mask,
+    VFX_OT_open_layer_matte_folder,
+    VFX_OT_assign_layer_mask_dialog,
+    VFX_OT_add_background,
+    VFX_OT_browse_bg_file,
+    VFX_OT_match_scene_fps,
+    VFX_OT_match_frame_start,
     VFX_PT_main,
     VFX_PT_post_effects,
     VFX_PT_compositor,
@@ -1099,6 +1390,13 @@ def unregister():
         except Exception:
             pass
 
+    # Unregister classes directly in reverse order (essential for PropertyGroups)
+    for cls in reversed(classes):
+        try:
+            bpy.utils.unregister_class(cls)
+        except Exception:
+            pass
+
     for name in set(CLASS_NAMES):
         old = getattr(bpy.types, name, None)
         if old is not None:
@@ -1108,10 +1406,9 @@ def unregister():
                 pass
 
     # Sweep orphaned VFX_* registrations left over from failed load attempts
-    # (e.g. "already registered as a subclass" after a partial registration)
     orphans = [
         n for n in dir(bpy.types)
-        if n.startswith(("VFX_OT_", "VFX_PT_", "VFX_UL_", "VFXLayer", "VFXProject"))
+        if n.startswith(("VFX_OT_", "VFX_PT_", "VFX_UL_", "VFXLayer", "VFXProject", "VFXOcclusion"))
     ]
     for name in orphans:
         old = getattr(bpy.types, name, None)
@@ -1145,20 +1442,20 @@ def register():
         try:
             bpy.utils.register_class(cls)
         except Exception as exc:
-            # Probably a stale RNA class with the same name is still registered:
-            # unregister it and retry once.
-            replaced = False
-            old = getattr(bpy.types, cls.__name__, None)
-            if old is not None:
-                try:
-                    bpy.utils.unregister_class(old)
-                    bpy.utils.register_class(cls)
-                    replaced = True
-                    print(f"VFX register: replaced stale class {cls.__name__}")
-                except Exception as exc2:
-                    print(f"VFX register ERROR {cls.__name__}: retry failed: {exc2}")
-            if not replaced:
-                print(f"VFX register ERROR {cls.__name__}: {exc}")
+            # Stale RNA class or PropertyGroup subclass: unregister and retry
+            try:
+                bpy.utils.unregister_class(cls)
+                bpy.utils.register_class(cls)
+            except Exception:
+                old = getattr(bpy.types, cls.__name__, None)
+                if old is not None:
+                    try:
+                        bpy.utils.unregister_class(old)
+                        bpy.utils.register_class(cls)
+                    except Exception as exc2:
+                        print(f"VFX register ERROR {cls.__name__}: {exc2}")
+                else:
+                    print(f"VFX register ERROR {cls.__name__}: {exc}")
 
     # Scene.vfx: kill any stale pointer (old build / foreign addon) and recreate
     if hasattr(bpy.types.Scene, "vfx"):
