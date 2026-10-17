@@ -816,8 +816,49 @@ def _draw_final_export(context, layout):
 
 
 # ---------------------------------------------------------------------
-# PANEL — MAIN (View3D sidebar)
+# PANEL — MAIN (View3D & Compositor Shared Draw)
 # ---------------------------------------------------------------------
+
+def _draw_vfx_main_panel(context, layout):
+    """Unified single-pipeline drawing function for both 3D Viewport and Compositor."""
+    if not hasattr(context.scene, "vfx"):
+        layout.label(text="Scene.vfx not registered — restart Blender", icon='ERROR')
+        return
+
+    try:
+        vfx, master = get_project(context, allow_write=False)
+
+        # Master Scene selector
+        top_row = layout.row(align=True)
+        top_row.prop(vfx, "master_scene", text=tr("Master:", context))
+
+        if vfx.master_scene is None:
+            layout.label(text=tr("Master scene not set:", context), icon='INFO')
+            layout.operator("vfx.set_master", text=tr("Set Master", context))
+
+        # 1. Layers & Active Layer card
+        _draw_layer_list(context, layout)
+
+        # 2. Batch render & Comp controls
+        _draw_render_settings(context, layout)
+
+        # 3. Post Effects (Post FX) — located ABOVE final export!
+        _draw_post_effects(context, layout)
+
+        # 4. Final Export (Video)
+        _draw_final_export(context, layout)
+
+        # 5. Bottom Footer: Language Switcher [ Русский | English ] + Version
+        layout.separator()
+        foot = layout.row(align=True)
+        foot.label(text="", icon='WORLD')
+        foot.prop(vfx, "vfx_ui_lang", expand=True)
+        foot.label(text=f"v{VFX_VERSION}")
+
+    except Exception as e:
+        layout.label(text="Panel draw error:", icon='ERROR')
+        layout.label(text=str(e))
+
 
 class VFX_PT_main(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
@@ -826,49 +867,11 @@ class VFX_PT_main(bpy.types.Panel):
     bl_label = "VFX Layers & Comp"
 
     def draw(self, context):
-        layout = self.layout
+        _draw_vfx_main_panel(context, self.layout)
 
-        if not hasattr(context.scene, "vfx"):
-            layout.label(text="Scene.vfx not registered — restart Blender", icon='ERROR')
-            return
-
-        try:
-            vfx, master = get_project(context, allow_write=False)
-
-            # Master Scene selector
-            top_row = layout.row(align=True)
-            top_row.prop(vfx, "master_scene", text=tr("Master:", context))
-
-            if vfx.master_scene is None:
-                layout.label(text=tr("Master scene not set:", context), icon='INFO')
-                layout.operator("vfx.set_master", text=tr("Set Master", context))
-
-            # 1. Layers & Active Layer card
-            _draw_layer_list(context, layout)
-
-            # 2. Batch render & Comp controls
-            _draw_render_settings(context, layout)
-
-            # 3. Post Effects (Post FX) — located ABOVE final export!
-            _draw_post_effects(context, layout)
-
-            # 4. Final Export (Video)
-            _draw_final_export(context, layout)
-
-            # 5. Bottom Footer: Language Switcher [ Русский | English ] + Version
-            layout.separator()
-            foot = layout.row(align=True)
-            foot.label(text="", icon='WORLD')
-            foot.prop(vfx, "vfx_ui_lang", expand=True)
-            foot.label(text=f"v{VFX_VERSION}")
-
-        except Exception as e:
-            layout.label(text="Panel draw error:", icon='ERROR')
-            layout.label(text=str(e))
-
-    # Keep draw_main for compositor panel compatibility
-    def draw_main(self, context, layout):
-        self.draw(context)
+    @staticmethod
+    def draw_main(instance, context, layout):
+        _draw_vfx_main_panel(context, layout)
 
 
 # ---------------------------------------------------------------------
@@ -907,15 +910,7 @@ class VFX_PT_compositor(bpy.types.Panel):
         return sd is not None and getattr(sd, "tree_type", "") == 'CompositorNodeTree'
 
     def draw(self, context):
-        layout = self.layout
-        if not hasattr(context.scene, "vfx"):
-            layout.label(text="Scene.vfx not registered — restart Blender", icon='ERROR')
-            return
-        try:
-            VFX_PT_main.draw_main(self, context, layout)
-        except Exception as e:
-            layout.label(text="Panel draw error:", icon='ERROR')
-            layout.label(text=str(e))
+        _draw_vfx_main_panel(context, self.layout)
 
 
 class VFX_PT_compositor_effects(bpy.types.Panel):
