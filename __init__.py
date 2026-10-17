@@ -1,14 +1,14 @@
-bl_info = {
+﻿bl_info = {
     "name": "VFX Layer Tools",
     "author": "VFX Pipeline",
-    "version": (3, 21, 0),
+    "version": (3, 22, 0),
     "blender": (5, 2, 1),
     "location": "View3D > Sidebar > VFX",
     "description": "VFX layer / scene / compositing manager",
     "category": "Compositing",
 }
 
-VFX_VERSION = "3.21.0"
+VFX_VERSION = "3.22.0"
 
 import bpy
 import importlib

@@ -1,4 +1,4 @@
-"""VFX Layer Tools — compositor node tree, fog system."""
+﻿"""VFX Layer Tools — compositor node tree, fog system."""
 
 import bpy
 import os
@@ -466,29 +466,57 @@ def load_matte_sequence_image(folder_or_path, name_prefix="VFX_MATTE"):
     return img, len(files), start_frame
 
 
-def cleanup_layer_matte_nodes(nt, layer_id):
-    """Remove any holdout matte nodes for the given layer ID."""
-    for name in (
-        f"VFX_MATTE_IMG_{layer_id}",
-        f"VFX_MATTE_SCALE_{layer_id}",
-        f"VFX_MATTE_BW_{layer_id}",
-        f"VFX_MATTE_SEP_{layer_id}",
-        f"VFX_MATTE_CHOKE_{layer_id}",
-        f"VFX_MATTE_FEATHER_{layer_id}",
-        f"VFX_MATTE_INV_{layer_id}",
-        f"VFX_MATTE_SEP_LAYER_{layer_id}",
-        f"VFX_MATTE_MUL_A_{layer_id}",
-        f"VFX_MATTE_MUL_RGB_{layer_id}",
-        f"VFX_MATTE_SA_{layer_id}",
-        f"VFX_MATTE_INV_SHD_{layer_id}",
-        f"VFX_MATTE_SEP_LAYER_SHD_{layer_id}",
-        f"VFX_MATTE_MUL_A_SHD_{layer_id}",
-        f"VFX_MATTE_MUL_RGB_SHD_{layer_id}",
-        f"VFX_MATTE_SA_SHD_{layer_id}",
-    ):
-        n = nt.nodes.get(name)
-        if n:
-            nt.nodes.remove(n)
+def cleanup_layer_matte_nodes(nt, layer_id, is_shadow=None):
+    """Remove holdout matte nodes and/or node group for the given layer ID."""
+    if nt is not None:
+        targets = []
+        if is_shadow is None or not is_shadow:
+            targets.append(f"VFX_MATTE_{layer_id}")
+            targets.extend([
+                f"VFX_MATTE_IMG_{layer_id}",
+                f"VFX_MATTE_SCALE_{layer_id}",
+                f"VFX_MATTE_BW_{layer_id}",
+                f"VFX_MATTE_SEP_{layer_id}",
+                f"VFX_MATTE_CHOKE_{layer_id}",
+                f"VFX_MATTE_FEATHER_{layer_id}",
+                f"VFX_MATTE_INV_{layer_id}",
+                f"VFX_MATTE_SEP_LAYER_{layer_id}",
+                f"VFX_MATTE_MUL_A_{layer_id}",
+                f"VFX_MATTE_MUL_RGB_{layer_id}",
+                f"VFX_MATTE_SA_{layer_id}",
+            ])
+        if is_shadow is None or is_shadow:
+            targets.append(f"VFX_MATTE_SHD_{layer_id}")
+            targets.extend([
+                f"VFX_MATTE_INV_SHD_{layer_id}",
+                f"VFX_MATTE_SEP_LAYER_SHD_{layer_id}",
+                f"VFX_MATTE_MUL_A_SHD_{layer_id}",
+                f"VFX_MATTE_MUL_RGB_SHD_{layer_id}",
+                f"VFX_MATTE_SA_SHD_{layer_id}",
+            ])
+
+        for name in targets:
+            n = nt.nodes.get(name)
+            if n:
+                try:
+                    nt.nodes.remove(n)
+                except Exception:
+                    pass
+
+    # If neither OBJ nor SHD matte nodes remain in nt, clean up the Node Group data block
+    group_name = f"VFX_Matte_{layer_id}"
+    ng = bpy.data.node_groups.get(group_name)
+    if ng is not None:
+        has_users = False
+        if nt is not None:
+            if nt.nodes.get(f"VFX_MATTE_{layer_id}") or nt.nodes.get(f"VFX_MATTE_SHD_{layer_id}"):
+                has_users = True
+        if not has_users:
+            try:
+                bpy.data.node_groups.remove(ng)
+            except Exception:
+                pass
+
 
 
 def cleanup_shadow_filter_nodes(nt, layer_id):
@@ -593,7 +621,7 @@ def apply_shadow_filter(nt, layer, sh_node, loc_x=550, loc_y=0):
                 blur = None
         if blur is not None:
             blur.label = f"{layer.layer_name} SHD Blur"
-            blur.location = (loc_x + 280, loc_y)
+            blur.location = (loc_x + 220, loc_y)
             _setup_blur_node(blur, b_px, b_px)
 
             bin_img = blur.inputs.get("Image") or blur.inputs[0]
@@ -755,253 +783,205 @@ def _make_mix_node(nt, name, label, blend_mode='MULTIPLY', location=(0, 0)):
     return mix, a_in, b_in, fac_in, out_s
 
 
-def apply_layer_matte(nt, layer, sock, is_shadow=False, loc_x=600, loc_y=0):
-    """Apply an external PNG image sequence matte (holdout) to a layer's image socket.
-
-    The mask cuts out (subtracts) from the layer's RGB and Alpha.
-    By default: white in mask = 3D layer is cut out (hole); black = kept.
-    If invert: white in mask = 3D layer is kept; black = cut out.
+def get_or_create_layer_matte_group(layer):
+    """Create or update a self-contained Node Group for holdout matte cutout.
+    Interface:
+      Input:
+        Image (NodeSocketColor) - The layer or shadow image stream to be masked
+      Output:
+        Image (NodeSocketColor) - Masked cutout image stream
+        Matte (NodeSocketFloat) - Black-and-white holdout mask (for inspection / compositing)
     """
-    if not getattr(layer, "use_holdout_matte", False):
-        return sock
-
-    if is_shadow and not getattr(layer, "holdout_matte_mask_shadow", True):
-        return sock
-
     path = getattr(layer, "holdout_matte_path", "")
     if not path:
-        cleanup_layer_matte_nodes(nt, layer.id)
-        return sock
+        return None
 
     img, num_files, start_frame = load_matte_sequence_image(path, name_prefix=f"VFX_MATTE_SEQ_{layer.id}")
     if img is None:
-        cleanup_layer_matte_nodes(nt, layer.id)
-        return sock
+        return None
 
-    tag = f"SHD_{layer.id}" if is_shadow else layer.id
+    group_name = f"VFX_Matte_{layer.id}"
+    ng = bpy.data.node_groups.get(group_name)
+    if ng is None:
+        ng = bpy.data.node_groups.new(group_name, 'CompositorNodeTree')
 
-    # 1. Image Sequence Node (one per layer, shared between OBJ and SHD)
-    img_node_name = f"VFX_MATTE_IMG_{layer.id}"
-    img_node = nt.nodes.get(img_node_name)
-    if img_node is not None and img_node.type != 'IMAGE':
-        nt.nodes.remove(img_node)
-        img_node = None
-    if img_node is None:
-        img_node = nt.nodes.new("CompositorNodeImage")
-        img_node.name = img_node_name
+    # Interface setup - preserve existing interface to avoid breaking external node group links!
+    need_interface = True
+    if hasattr(ng, "interface") and hasattr(ng.interface, "items_tree"):
+        in_socks = [s.name for s in ng.interface.items_tree if getattr(s, "in_out", None) == 'INPUT']
+        out_socks = [s.name for s in ng.interface.items_tree if getattr(s, "in_out", None) == 'OUTPUT']
+        if "Image" in in_socks and "Image" in out_socks and "Matte" in out_socks:
+            need_interface = False
 
-    img_node.label = f"MATTE SEQ: {layer.layer_name}"
-    img_node.location = (loc_x - 650, loc_y + 150)
+    if need_interface and hasattr(ng, "interface"):
+        try:
+            for item in list(ng.interface.items_tree):
+                ng.interface.remove(item)
+        except Exception:
+            pass
+        try:
+            ng.interface.new_socket("Image", in_out='INPUT', socket_type='NodeSocketColor')
+            ng.interface.new_socket("Image", in_out='OUTPUT', socket_type='NodeSocketColor')
+            ng.interface.new_socket("Matte", in_out='OUTPUT', socket_type='NodeSocketFloat')
+        except Exception as e:
+            print(f"VFX: error creating matte group interface sockets: {e}")
+
     fstart = getattr(layer, "holdout_matte_frame_start", 1)
     foffset = getattr(layer, "holdout_matte_frame_offset", 0)
+    choke = int(getattr(layer, "holdout_matte_choke", 0))
+    feather = float(getattr(layer, "holdout_matte_feather", 0.0))
+    invert = getattr(layer, "holdout_matte_invert", False)
+    mode = getattr(layer, "holdout_matte_mode", 'LUMA')
+
+    sig = f"{path}_{fstart}_{foffset}_{choke}_{feather}_{invert}_{mode}"
+    if ng.get("vfx_matte_sig") == sig and len(ng.nodes) >= 9:
+        return ng
+
+    ng.nodes.clear()
+
+    gin = ng.nodes.new("NodeGroupInput")
+    gin.location = (-600, 0)
+    gout = ng.nodes.new("NodeGroupOutput")
+    gout.location = (1400, 0)
+
+    # 1. Matte image sequence
+    img_node = ng.nodes.new("CompositorNodeImage")
+    img_node.name = "Matte_Image"
+    img_node.label = f"Matte Seq ({num_files} frames)"
+    img_node.location = (-400, 200)
     _configure_image_node_sequence(img_node, img, is_static=False, frame_start=fstart, frame_offset=foffset)
 
-    # 2. Scale Node (Match canvas render resolution)
-    scale_node_name = f"VFX_MATTE_SCALE_{layer.id}"
-    scale_node = nt.nodes.get(scale_node_name)
-    if scale_node is None:
-        scale_node = _new_node(nt, "CompositorNodeScale")
-        if scale_node is not None:
-            scale_node.name = scale_node_name
+    # 2. Scale node (match canvas resolution)
+    scale_node = _new_node(ng, "CompositorNodeScale")
     if scale_node is not None:
-        scale_node.label = f"Scale Matte: {layer.layer_name}"
+        scale_node.name = "Matte_Scale"
+        scale_node.label = "Scale to Canvas"
+        scale_node.location = (-200, 200)
         _setup_scale_node(scale_node)
-        scale_node.location = (loc_x - 520, loc_y + 150)
-        if img_node.outputs.get("Image"):
-            for l in list(scale_node.inputs[0].links):
-                nt.links.remove(l)
-            nt.links.new(img_node.outputs["Image"], scale_node.inputs[0])
+        ng.links.new(img_node.outputs["Image"], scale_node.inputs[0])
         matte_color_out = scale_node.outputs.get("Image") or img_node.outputs.get("Image")
     else:
         matte_color_out = img_node.outputs.get("Image")
 
-    # 3. Channel selection (Luma / Alpha)
+    # 3. Channel selection
     mode = getattr(layer, "holdout_matte_mode", 'LUMA')
-    matte_val_sock = None
     if mode == 'ALPHA':
-        if scale_node is not None and scale_node.outputs.get("Alpha"):
-            matte_val_sock = scale_node.outputs["Alpha"]
-        elif img_node.outputs.get("Alpha"):
-            matte_val_sock = img_node.outputs["Alpha"]
+        sep_m = _new_node(ng, "CompositorNodeSeparateColor")
+        if sep_m is not None:
+            sep_m.name = "Matte_SepAlpha"
+            sep_m.location = (0, 200)
+            ng.links.new(matte_color_out, sep_m.inputs[0])
+            cur_mask = sep_m.outputs.get("Alpha") or sep_m.outputs[-1]
         else:
-            sep_m_name = f"VFX_MATTE_SEP_{layer.id}"
-            sep_m = nt.nodes.get(sep_m_name)
-            if sep_m is None:
-                sep_m = _new_node(nt, "CompositorNodeSeparateColor")
-                if sep_m is not None:
-                    sep_m.name = sep_m_name
-            if sep_m is not None:
-                sep_m.location = (loc_x - 350, loc_y + 150)
-                if matte_color_out:
-                    for l in list(sep_m.inputs[0].links):
-                        nt.links.remove(l)
-                    nt.links.new(matte_color_out, sep_m.inputs[0])
-                matte_val_sock = sep_m.outputs.get("Alpha") or sep_m.outputs[-1]
-    else:  # LUMA
-        bw_name = f"VFX_MATTE_BW_{layer.id}"
-        bw_node = nt.nodes.get(bw_name)
-        if bw_node is None:
-            bw_node = _new_node(nt, "CompositorNodeRGBToBW")
-            if bw_node is not None:
-                bw_node.name = bw_name
-        if bw_node is not None:
-            bw_node.location = (loc_x - 350, loc_y + 150)
-            if matte_color_out:
-                for l in list(bw_node.inputs[0].links):
-                    nt.links.remove(l)
-                nt.links.new(matte_color_out, bw_node.inputs[0])
-            matte_val_sock = bw_node.outputs.get("Val") or bw_node.outputs[0]
+            cur_mask = matte_color_out
+    else:
+        bw = _new_node(ng, "CompositorNodeRGBToBW")
+        if bw is not None:
+            bw.name = "Matte_RGBToBW"
+            bw.location = (0, 200)
+            ng.links.new(matte_color_out, bw.inputs[0])
+            cur_mask = bw.outputs.get("Val") or bw.outputs[0]
+        else:
+            cur_mask = matte_color_out
 
-    if matte_val_sock is None:
-        matte_val_sock = matte_color_out
-
-    # 4. Optional Choke / Dilate / Erode (Contract / Expand mask)
-    # Negative choke (e.g. -3 px) = erode/shrink the mask inwards, closing transparent gaps around thin foreground objects (poles, wires)
-    # Positive choke (e.g. +2 px) = expand the mask outwards
+    # 4. Choke (Dilate/Erode)
     choke = int(getattr(layer, "holdout_matte_choke", 0))
     if choke != 0:
-        choke_name = f"VFX_MATTE_CHOKE_{layer.id}"
-        choke_node = nt.nodes.get(choke_name)
-        if choke_node is None:
-            choke_node = _new_node(nt, "CompositorNodeDilateErode")
-            if choke_node is not None:
-                choke_node.name = choke_name
+        choke_node = _new_node(ng, "CompositorNodeDilateErode")
         if choke_node is not None:
-            choke_node.label = f"Matte Choke ({choke:+d}px)"
-            choke_node.location = (loc_x - 180, loc_y + 150)
+            choke_node.name = "Matte_Choke"
+            choke_node.label = f"Choke ({choke:+d}px)"
+            choke_node.location = (200, 200)
             _setup_dilate_erode_node(choke_node, distance=choke, mode='Distance')
             min_sock = choke_node.inputs.get("Mask") or choke_node.inputs[0]
-            for l in list(min_sock.links):
-                nt.links.remove(l)
-            nt.links.new(matte_val_sock, min_sock)
-            matte_val_sock = choke_node.outputs.get("Mask") or choke_node.outputs[0]
-    else:
-        old_choke = nt.nodes.get(f"VFX_MATTE_CHOKE_{layer.id}")
-        if old_choke:
-            nt.nodes.remove(old_choke)
+            ng.links.new(cur_mask, min_sock)
+            cur_mask = choke_node.outputs.get("Mask") or choke_node.outputs[0]
 
-    # 5. Optional Feather (Blur)
+    # 5. Feather (Blur)
     feather = float(getattr(layer, "holdout_matte_feather", 0.0))
     if feather > 0.001:
-        blur_name = f"VFX_MATTE_FEATHER_{layer.id}"
-        blur_node = nt.nodes.get(blur_name)
-        if blur_node is None:
-            blur_node = _new_node(nt, "CompositorNodeBlur")
-            if blur_node is not None:
-                blur_node.name = blur_name
+        blur_node = _new_node(ng, "CompositorNodeBlur")
         if blur_node is not None:
-            blur_node.label = f"Matte Feather ({feather:.0f}px)"
-            blur_node.location = (loc_x - 10, loc_y + 150)
+            blur_node.name = "Matte_Feather"
+            blur_node.label = f"Feather ({feather:.0f}px)"
+            blur_node.location = (400, 200)
             _setup_blur_node(blur_node, feather, feather)
-            for l in list(blur_node.inputs[0].links):
-                nt.links.remove(l)
-            nt.links.new(matte_val_sock, blur_node.inputs[0])
-            matte_val_sock = blur_node.outputs[0]
-    else:
-        old_blur = nt.nodes.get(f"VFX_MATTE_FEATHER_{layer.id}")
-        if old_blur:
-            nt.nodes.remove(old_blur)
+            ng.links.new(cur_mask, blur_node.inputs[0])
+            cur_mask = blur_node.outputs[0]
 
-    # 5. Inversion / Keep Factor (F)
+    # 6. Invert (Cutout vs Keep factor)
     # Default (invert=False): white mask = CUT OUT layer (F = 1 - mask).
     # Invert (invert=True): white mask = KEEP layer (F = mask).
     invert = getattr(layer, "holdout_matte_invert", False)
     if not invert:
-        sub_name = f"VFX_MATTE_INV_{tag}"
-        sub_node = nt.nodes.get(sub_name)
-        if sub_node is None:
-            sub_node = _new_node(nt, "ShaderNodeMath", "CompositorNodeMath")
-            if sub_node is not None:
-                sub_node.name = sub_name
+        sub_node = _new_node(ng, "ShaderNodeMath", "CompositorNodeMath")
         if sub_node is not None:
-            sub_node.operation = 'SUBTRACT'
+            sub_node.name = "Matte_Invert"
             sub_node.label = "1.0 - Matte (Cutout)"
-            sub_node.location = (loc_x - 40, loc_y + 150)
+            sub_node.operation = 'SUBTRACT'
+            sub_node.location = (600, 200)
             sub_node.inputs[0].default_value = 1.0
-            for l in list(sub_node.inputs[1].links):
-                nt.links.remove(l)
-            nt.links.new(matte_val_sock, sub_node.inputs[1])
+            ng.links.new(cur_mask, sub_node.inputs[1])
             fac_sock = sub_node.outputs[0]
         else:
-            fac_sock = matte_val_sock
+            fac_sock = cur_mask
     else:
-        fac_sock = matte_val_sock
-        old_sub = nt.nodes.get(f"VFX_MATTE_INV_{tag}")
-        if old_sub:
-            nt.nodes.remove(old_sub)
+        fac_sock = cur_mask
 
-    # 6. Apply to layer image and alpha
-    # Alpha: Layer_Alpha * F
-    sep_layer_name = f"VFX_MATTE_SEP_LAYER_{tag}"
-    sep_layer = nt.nodes.get(sep_layer_name)
-    if sep_layer is None:
-        sep_layer = _new_node(nt, "CompositorNodeSeparateColor")
-        if sep_layer is not None:
-            sep_layer.name = sep_layer_name
-    if sep_layer is not None:
-        sep_layer.location = (loc_x + 80, loc_y + 80)
-        for l in list(sep_layer.inputs[0].links):
-            nt.links.remove(l)
-        nt.links.new(sock, sep_layer.inputs[0])
-        layer_orig_alpha = sep_layer.outputs.get("Alpha") or sep_layer.outputs[-1]
+    # Connect raw mask to Group Output 'Matte' socket
+    m_out = gout.inputs.get("Matte") or (gout.inputs[1] if len(gout.inputs) > 1 else None)
+    if m_out is not None:
+        ng.links.new(cur_mask, m_out)
+
+    # 7. Cutout on Group Input Image
+    in_img = gin.outputs.get("Image") or gin.outputs[0]
+
+    # Separate Alpha
+    sep = _new_node(ng, "CompositorNodeSeparateColor")
+    if sep is not None:
+        sep.name = "Cutout_SepColor"
+        sep.location = (800, 50)
+        ng.links.new(in_img, sep.inputs[0])
+        orig_a = sep.outputs.get("Alpha") or sep.outputs[-1]
     else:
-        layer_orig_alpha = None
+        orig_a = None
 
-    # Alpha multiply:
-    mul_a_name = f"VFX_MATTE_MUL_A_{tag}"
-    mul_a = nt.nodes.get(mul_a_name)
-    if mul_a is None:
-        mul_a = _new_node(nt, "ShaderNodeMath", "CompositorNodeMath")
-        if mul_a is not None:
-            mul_a.name = mul_a_name
+    # Alpha multiply: orig_alpha * fac
+    mul_a = _new_node(ng, "ShaderNodeMath", "CompositorNodeMath")
     if mul_a is not None:
+        mul_a.name = "Cutout_MulAlpha"
         mul_a.operation = 'MULTIPLY'
-        mul_a.location = (loc_x + 230, loc_y + 80)
-        if layer_orig_alpha is not None:
-            for l in list(mul_a.inputs[0].links):
-                nt.links.remove(l)
-            nt.links.new(layer_orig_alpha, mul_a.inputs[0])
+        mul_a.location = (1000, 80)
+        if orig_a is not None:
+            ng.links.new(orig_a, mul_a.inputs[0])
         else:
             mul_a.inputs[0].default_value = 1.0
-        for l in list(mul_a.inputs[1].links):
-            nt.links.remove(l)
-        nt.links.new(fac_sock, mul_a.inputs[1])
+        ng.links.new(fac_sock, mul_a.inputs[1])
         final_alpha_sock = mul_a.outputs[0]
     else:
         final_alpha_sock = fac_sock
 
-    # RGB multiply: Color * F
+    # RGB multiply: RGB * fac
     mul_rgb, a_in, b_in, fac_in, out_s = _make_mix_node(
-        nt, f"VFX_MATTE_MUL_RGB_{tag}",
-        f"Matte RGB Multiply: {layer.layer_name}",
-        blend_mode='MULTIPLY',
-        location=(loc_x + 230, loc_y - 60)
+        ng, "Cutout_MulRGB", "Multiply RGB",
+        blend_mode='MULTIPLY', location=(1000, -80)
     )
     if mul_rgb is not None:
         if fac_in is not None:
             fac_in.default_value = 1.0
         if a_in is not None:
-            for l in list(a_in.links):
-                nt.links.remove(l)
-            nt.links.new(sock, a_in)
+            ng.links.new(in_img, a_in)
         if b_in is not None:
-            for l in list(b_in.links):
-                nt.links.remove(l)
-            nt.links.new(fac_sock, b_in)
-        final_rgb_sock = out_s if out_s is not None else sock
+            ng.links.new(fac_sock, b_in)
+        rgb_out_sock = out_s if out_s is not None else in_img
     else:
-        final_rgb_sock = sock
+        rgb_out_sock = in_img
 
-    # Set Alpha node:
-    sa_name = f"VFX_MATTE_SA_{tag}"
-    sa = nt.nodes.get(sa_name)
-    if sa is None:
-        sa = _new_node(nt, "CompositorNodeSetAlpha")
-        if sa is not None:
-            sa.name = sa_name
+    # Set Alpha
+    sa = _new_node(ng, "CompositorNodeSetAlpha")
     if sa is not None:
-        sa.location = (loc_x + 390, loc_y)
-        sa.label = f"Matte Cutout: {layer.layer_name}"
+        sa.name = "Cutout_SetAlpha"
+        sa.location = (1200, 0)
         if hasattr(sa, "mode"):
             try:
                 sa.mode = 'REPLACE'
@@ -1014,15 +994,65 @@ def apply_layer_matte(nt, layer, sock, is_shadow=False, loc_x=600, loc_y=0):
                 pass
         img_in = sa.inputs.get("Image") or sa.inputs[0]
         alpha_in = sa.inputs.get("Alpha") or sa.inputs[1]
-        for l in list(img_in.links):
-            nt.links.remove(l)
-        nt.links.new(final_rgb_sock, img_in)
-        for l in list(alpha_in.links):
-            nt.links.remove(l)
-        nt.links.new(final_alpha_sock, alpha_in)
-        return sa.outputs.get("Image") or sa.outputs[0]
+        ng.links.new(rgb_out_sock, img_in)
+        ng.links.new(final_alpha_sock, alpha_in)
+        final_cutout_sock = sa.outputs.get("Image") or sa.outputs[0]
+    else:
+        final_cutout_sock = rgb_out_sock
 
-    return final_rgb_sock
+    out_img = gout.inputs.get("Image") or gout.inputs[0]
+    ng.links.new(final_cutout_sock, out_img)
+
+    ng["vfx_matte_sig"] = sig
+    return ng
+
+
+def apply_layer_matte(nt, layer, sock, is_shadow=False, loc_x=600, loc_y=0):
+    """Apply an external PNG image sequence matte (holdout) to a layer's image socket
+    via an encapsulated Node Group.
+    """
+    if sock is None:
+        return None
+
+    if not getattr(layer, "use_holdout_matte", False):
+        cleanup_layer_matte_nodes(nt, layer.id, is_shadow=is_shadow)
+        return sock
+
+    if is_shadow and not getattr(layer, "holdout_matte_mask_shadow", True):
+        cleanup_layer_matte_nodes(nt, layer.id, is_shadow=True)
+        return sock
+
+    ng = get_or_create_layer_matte_group(layer)
+    if ng is None:
+        cleanup_layer_matte_nodes(nt, layer.id, is_shadow=is_shadow)
+        return sock
+
+    node_name = f"VFX_MATTE_SHD_{layer.id}" if is_shadow else f"VFX_MATTE_{layer.id}"
+    label = f"Matte Cutout SHD: {layer.layer_name}" if is_shadow else f"Matte Cutout: {layer.layer_name}"
+
+    grp_node = nt.nodes.get(node_name)
+    if grp_node is not None and grp_node.type != 'GROUP':
+        nt.nodes.remove(grp_node)
+        grp_node = None
+
+    if grp_node is None:
+        grp_node = _new_node(nt, "CompositorNodeGroup", "ShaderNodeGroup", "NodeGroup")
+        if grp_node is not None:
+            grp_node.name = node_name
+
+    if grp_node is None:
+        return sock
+
+    grp_node.node_tree = ng
+    grp_node.label = label
+    grp_node.location = (loc_x, loc_y)
+
+    in_img = grp_node.inputs.get("Image") or grp_node.inputs[0]
+    for l in list(in_img.links):
+        nt.links.remove(l)
+    nt.links.new(sock, in_img)
+
+    return grp_node.outputs.get("Image") or grp_node.outputs[0]
 
 
 def _cleanup_bg_nodes(nt):
@@ -2577,10 +2607,28 @@ def build_comp_assembly(vfx, master, nt=None):
     active_matte_ids = {layer.id for layer in vfx.layers if getattr(layer, "use_holdout_matte", False)}
     for node in list(nt.nodes):
         if node.name.startswith("VFX_MATTE_"):
-            parts = node.name.split("_")
-            lid = parts[-1]
+            if node.type != 'GROUP':
+                try:
+                    nt.nodes.remove(node)
+                except Exception:
+                    pass
+            else:
+                parts = node.name.split("_")
+                lid = parts[-1]
+                if lid not in active_matte_ids:
+                    try:
+                        nt.nodes.remove(node)
+                    except Exception:
+                        pass
+
+    for ng in list(bpy.data.node_groups):
+        if ng.name.startswith("VFX_Matte_"):
+            lid = ng.name[len("VFX_Matte_"):]
             if lid not in active_matte_ids:
-                nt.nodes.remove(node)
+                try:
+                    bpy.data.node_groups.remove(ng)
+                except Exception:
+                    pass
 
     # Clean up inactive / deleted shadow filter nodes
     active_shd_ids = {layer.id for layer in vfx.layers if layer.shadow_scene or getattr(layer, "shadow_tech", '3D') == 'AI'}
@@ -2607,7 +2655,7 @@ def build_comp_assembly(vfx, master, nt=None):
         if layer.shadow_scene or getattr(layer, "shadow_tech", '3D') == 'AI':
             sh = nt.nodes.get(f"VFX_RL_{layer.id}_SHD")
             if sh:
-                sh_sock = apply_shadow_filter(nt, layer, sh, loc_x=550, loc_y=-len(sockets) * 200)
+                sh_sock = apply_shadow_filter(nt, layer, sh, loc_x=260, loc_y=-len(sockets) * 200)
                 if sh_sock is None and sh.outputs.get("Image"):
                     sh_sock = sh.outputs["Image"]
 
@@ -2799,14 +2847,14 @@ def build_comp_assembly(vfx, master, nt=None):
         stack_sock = blur_nodes.get(first_layer.id, grade_nodes.get(first_layer.id, first_sock)) if first_kind == 'OBJ' else first_sock
         if first_kind == 'OBJ':
             if getattr(first_layer, "use_holdout_matte", False):
-                stack_sock = apply_layer_matte(nt, first_layer, stack_sock, is_shadow=False, loc_x=600, loc_y=0)
+                stack_sock = apply_layer_matte(nt, first_layer, stack_sock, is_shadow=False, loc_x=650, loc_y=100)
             else:
-                cleanup_layer_matte_nodes(nt, first_layer.id)
+                cleanup_layer_matte_nodes(nt, first_layer.id, is_shadow=False)
         elif first_kind == 'SHD':
             if getattr(first_layer, "use_holdout_matte", False) and getattr(first_layer, "holdout_matte_mask_shadow", True):
-                stack_sock = apply_layer_matte(nt, first_layer, stack_sock, is_shadow=True, loc_x=600, loc_y=0)
+                stack_sock = apply_layer_matte(nt, first_layer, stack_sock, is_shadow=True, loc_x=720, loc_y=-100)
             else:
-                cleanup_layer_matte_nodes(nt, first_layer.id)
+                cleanup_layer_matte_nodes(nt, first_layer.id, is_shadow=True)
         mix_list = sockets[1:]
     else:
         stack_sock = None
@@ -2825,12 +2873,14 @@ def build_comp_assembly(vfx, master, nt=None):
                     sock = gsock
 
             if getattr(layer, "use_holdout_matte", False):
-                sock = apply_layer_matte(nt, layer, sock, is_shadow=False, loc_x=600, loc_y=-mix_index * 200)
+                sock = apply_layer_matte(nt, layer, sock, is_shadow=False, loc_x=650, loc_y=-mix_index * 200 + 80)
             else:
-                cleanup_layer_matte_nodes(nt, layer.id)
+                cleanup_layer_matte_nodes(nt, layer.id, is_shadow=False)
         elif kind == 'SHD':
             if getattr(layer, "use_holdout_matte", False) and getattr(layer, "holdout_matte_mask_shadow", True):
-                sock = apply_layer_matte(nt, layer, sock, is_shadow=True, loc_x=600, loc_y=-mix_index * 200)
+                sock = apply_layer_matte(nt, layer, sock, is_shadow=True, loc_x=720, loc_y=-mix_index * 200 - 80)
+            else:
+                cleanup_layer_matte_nodes(nt, layer.id, is_shadow=True)
 
         is_ai_shd = (kind == 'SHD' and getattr(layer, "shadow_tech", '3D') == 'AI')
 
@@ -2843,7 +2893,7 @@ def build_comp_assembly(vfx, master, nt=None):
                 f"VFX_AI_SHD_MIX_{mix_index:02d}",
                 f"{layer.layer_name} AI Shadow ({blend_type})",
                 blend_mode=blend_type,
-                location=(800, -mix_index * 200)
+                location=(950, -mix_index * 200)
             )
             if mix is not None:
                 mix["vfx_mix"] = 1
@@ -2864,7 +2914,7 @@ def build_comp_assembly(vfx, master, nt=None):
             mix.name = f"VFX_MIX_{mix_index:02d}"
             mix.label = f"{layer.layer_name} {kind}"
             mix["vfx_mix"] = 1
-            mix.location = (800, -mix_index * 200)
+            mix.location = (950, -mix_index * 200)
 
             img = [s for s in mix.inputs if s.type == 'RGBA']
             fac = [s for s in mix.inputs if s.type == 'VALUE']
