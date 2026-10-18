@@ -271,6 +271,31 @@ def _draw_layer_list(context, layout):
         if layer.is_static:
             st_row.prop(layer, "static_frame", text=tr("Frame:", context))
 
+        # ── BLEND MODE & COMPOSITING ──
+        bm_box = box.box()
+        bm_head = bm_box.row(align=True)
+        is_custom_blend = (getattr(layer, "blend_mode", 'ALPHA_OVER') != 'ALPHA_OVER')
+        bm_head.prop(
+            layer, "blend_expanded", text="",
+            icon='TRIA_DOWN' if layer.blend_expanded else 'TRIA_RIGHT',
+            emboss=False
+        )
+        if not is_custom_blend:
+            bm_head.label(text=tr("Blend Mode", context), icon='RENDERLAYERS')
+        else:
+            bm_head.label(text=f"{tr('Blend:', context)} {layer.blend_mode.title()}", icon='COLOR')
+        bm_head.prop(layer, "blend_mode", text="")
+
+        if layer.blend_expanded or is_custom_blend:
+            bc = bm_box.column(align=True)
+            r_target = bc.row(align=True)
+            r_target.label(text=tr("Blend with:", context), icon='IMAGE_REFERENCE')
+            r_target.prop(layer, "blend_target", text="")
+
+            r_opac = bc.row(align=True)
+            r_opac.label(text=tr("Opacity:", context), icon='PROP_OFF')
+            r_opac.prop(layer, "blend_opacity", text="", slider=True)
+
         # ── 3D SHADOW PASS & FILTER ──
         sbox = box.box()
         shead = sbox.row(align=True)

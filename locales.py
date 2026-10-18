@@ -239,6 +239,32 @@ TRANSLATIONS = {
         'EN': "Folder",
     },
 
+    # Blend Modes
+    "Blend Mode": {
+        'RU': "Режим смешивания",
+        'EN': "Blend Mode",
+    },
+    "Blend:": {
+        'RU': "Смешивание:",
+        'EN': "Blend:",
+    },
+    "Blend with:": {
+        'RU': "С чем смешивать:",
+        'EN': "Blend with:",
+    },
+    "Opacity:": {
+        'RU': "Непрозрачность:",
+        'EN': "Opacity:",
+    },
+    "Stack (Below)": {
+        'RU': "Стек (Под слоем)",
+        'EN': "Stack (Below)",
+    },
+    "Background (Backplate)": {
+        'RU': "Только задник (Фон)",
+        'EN': "Background (Backplate)",
+    },
+
     # Layer Overrides
     "LAYER OVERRIDES (DOF / GRADE)": {
         'RU': "ОВЕРРАЙДЫ СЛОЯ (DOF / ЦВЕТ)",

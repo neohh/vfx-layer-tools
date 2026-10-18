@@ -1,4 +1,4 @@
-﻿"""VFX Layer Tools — compositor node tree, fog system."""
+"""VFX Layer Tools — compositor node tree, fog system."""
 
 import bpy
 import os
@@ -2907,6 +2907,81 @@ def build_comp_assembly(vfx, master, nt=None):
                     nt.links.new(current, a_in)
                 if b_in is not None and sock is not None:
                     nt.links.new(sock, b_in)
+                current = out_s if out_s is not None else current
+                mix_index += 1
+        elif kind == 'OBJ' and getattr(layer, "blend_mode", 'ALPHA_OVER') != 'ALPHA_OVER':
+            b_mode = getattr(layer, "blend_mode", 'OVERLAY')
+            b_target = getattr(layer, "blend_target", 'STACK')
+            b_opac = float(getattr(layer, "blend_opacity", 1.0))
+
+            # Base stream to blend onto
+            if b_target == 'BACKGROUND' and bg_sock is not None:
+                base_in = bg_sock
+            else:
+                base_in = current
+
+            mix_name = f"VFX_MIX_{mix_index:02d}"
+            mix, a_in, b_in, fac_in, out_s = _make_mix_node(
+                nt,
+                mix_name,
+                f"{layer.layer_name} ({b_mode})",
+                blend_mode=b_mode,
+                location=(950, -mix_index * 200)
+            )
+            if mix is not None:
+                mix["vfx_mix"] = 1
+                if hasattr(mix, "clamp_factor"):
+                    try:
+                        mix.clamp_factor = True
+                    except Exception:
+                        pass
+
+                # Extract alpha from the layer stream (includes grade/blur/matte)
+                sep_name = f"VFX_SEP_A_{layer.id}"
+                sep = nt.nodes.get(sep_name)
+                if sep is None:
+                    sep = _new_node(nt, "CompositorNodeSeparateColor")
+                    if sep is not None:
+                        sep.name = sep_name
+                if sep is not None:
+                    sep["vfx_mix"] = 1
+                    sep.location = (780, -mix_index * 200 + 60)
+                    for l in list(sep.inputs[0].links):
+                        nt.links.remove(l)
+                    nt.links.new(sock, sep.inputs[0])
+                    alpha_out = sep.outputs.get("Alpha") or sep.outputs[-1]
+                else:
+                    alpha_out = None
+
+                # Opacity modulation
+                if b_opac < 0.999 and alpha_out is not None:
+                    mul_name = f"VFX_OPAC_{layer.id}"
+                    mul = nt.nodes.get(mul_name)
+                    if mul is None:
+                        mul = _new_node(nt, "ShaderNodeMath", "CompositorNodeMath")
+                        if mul is not None:
+                            mul.name = mul_name
+                    if mul is not None:
+                        mul["vfx_mix"] = 1
+                        mul.operation = 'MULTIPLY'
+                        mul.location = (860, -mix_index * 200 + 60)
+                        for l in list(mul.inputs[0].links):
+                            nt.links.remove(l)
+                        nt.links.new(alpha_out, mul.inputs[0])
+                        mul.inputs[1].default_value = b_opac
+                        fac_sock = mul.outputs[0]
+                    else:
+                        fac_sock = alpha_out
+                else:
+                    fac_sock = alpha_out
+
+                if a_in is not None and base_in is not None:
+                    nt.links.new(base_in, a_in)
+                if b_in is not None and sock is not None:
+                    nt.links.new(sock, b_in)
+                if fac_in is not None and fac_sock is not None:
+                    nt.links.new(fac_sock, fac_in)
+
                 current = out_s if out_s is not None else current
                 mix_index += 1
         else:

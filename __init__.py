@@ -1,14 +1,14 @@
 bl_info = {
     "name": "VFX Layer Tools",
     "author": "VFX Pipeline",
-    "version": (3, 23, 1),
+    "version": (3, 24, 0),
     "blender": (5, 2, 1),
     "location": "View3D > Sidebar > VFX",
     "description": "VFX layer / scene / compositing manager",
     "category": "Compositing",
 }
 
-VFX_VERSION = "3.23.1"
+VFX_VERSION = "3.24.0"
 
 import bpy
 import importlib
@@ -368,6 +368,51 @@ class VFXLayer(bpy.types.PropertyGroup):
         default=1,
         min=0,
         update=lambda self, ctx: _trigger_comp(ctx)
+    )
+
+    # -- Layer Blend Mode & Target --
+    blend_mode: EnumProperty(
+        name="Blend Mode",
+        description="How this layer blends with underlying layers or background",
+        items=(
+            ('ALPHA_OVER', "Alpha Over (Normal)", "Normal over compositing (default)"),
+            ('OVERLAY', "Overlay", "Overlay: lightens highlights, darkens shadows (ideal for decals/graffiti on ground/walls)"),
+            ('SOFT_LIGHT', "Soft Light", "Soft Light: gentler contrast blend"),
+            ('MULTIPLY', "Multiply", "Multiply: darkens (ideal for dirt, stains, shadows)"),
+            ('SCREEN', "Screen", "Screen: lightens (ideal for fire, sparks, light beams)"),
+            ('ADD', "Add", "Add: glow and energy effects"),
+            ('DARKEN', "Darken", "Darken: keeps darker colors"),
+            ('LIGHTEN', "Lighten", "Lighten: keeps lighter colors"),
+            ('COLOR_DODGE', "Color Dodge", "Color Dodge: bright dodge effect"),
+            ('DIFFERENCE', "Difference", "Difference"),
+            ('DIVIDE', "Divide", "Divide"),
+        ),
+        default='ALPHA_OVER',
+        update=lambda s, c: _trigger_comp(c),
+    )
+    blend_target: EnumProperty(
+        name="Blend Target",
+        description="Target stream to blend this layer onto",
+        items=(
+            ('STACK', "Stack (Below)", "Blend onto everything underneath this layer in the stack"),
+            ('BACKGROUND', "Background (Backplate)", "Blend directly onto the background plate"),
+        ),
+        default='STACK',
+        update=lambda s, c: _trigger_comp(c),
+    )
+    blend_opacity: FloatProperty(
+        name="Blend Opacity",
+        description="Strength / opacity of the blend effect (0.0 to 1.0)",
+        default=1.0,
+        min=0.0,
+        max=1.0,
+        subtype='FACTOR',
+        update=lambda s, c: _trigger_comp(c),
+    )
+    blend_expanded: BoolProperty(
+        name="Blend Expanded",
+        description="Show detailed blend mode settings",
+        default=False,
     )
 
     # -- Inter-layer occlusion (holdout) --
