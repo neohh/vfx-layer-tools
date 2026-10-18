@@ -2913,6 +2913,8 @@ def build_comp_assembly(vfx, master, nt=None):
             b_mode = getattr(layer, "blend_mode", 'OVERLAY')
             b_target = getattr(layer, "blend_target", 'STACK')
             b_opac = float(getattr(layer, "blend_opacity", 1.0))
+            b_infl = float(getattr(layer, "blend_influence", 0.5))
+            b_exp = float(getattr(layer, "blend_exposure", 0.0))
 
             # Base stream to blend onto
             if b_target == 'BACKGROUND' and bg_sock is not None:
@@ -2920,38 +2922,103 @@ def build_comp_assembly(vfx, master, nt=None):
             else:
                 base_in = current
 
-            mix_name = f"VFX_MIX_{mix_index:02d}"
-            mix, a_in, b_in, fac_in, out_s = _make_mix_node(
-                nt,
-                mix_name,
-                f"{layer.layer_name} ({b_mode})",
-                blend_mode=b_mode,
-                location=(950, -mix_index * 200)
-            )
-            if mix is not None:
-                mix["vfx_mix"] = 1
-                if hasattr(mix, "clamp_factor"):
+            # 1. Optional Exposure / Brightness trim on the decal stream
+            decal_stream = sock
+            if abs(b_exp) > 0.001:
+                exp_name = f"VFX_EXP_{layer.id}"
+                exp_node = nt.nodes.get(exp_name)
+                if exp_node is None:
+                    exp_node = _new_node(nt, "CompositorNodeExposure")
+                    if exp_node is not None:
+                        exp_node.name = exp_name
+                if exp_node is not None:
+                    exp_node["vfx_mix"] = 1
+                    exp_node.location = (700, -mix_index * 200 + 40)
+                    for l in list(exp_node.inputs[0].links):
+                        nt.links.remove(l)
+                    nt.links.new(sock, exp_node.inputs[0])
                     try:
-                        mix.clamp_factor = True
+                        exp_node.inputs[1].default_value = b_exp
                     except Exception:
                         pass
+                    decal_stream = exp_node.outputs[0]
+            else:
+                exp_node = nt.nodes.get(f"VFX_EXP_{layer.id}")
+                if exp_node is not None:
+                    nt.nodes.remove(exp_node)
 
-                # Extract alpha from the layer stream (includes grade/blur/matte)
-                sep_name = f"VFX_SEP_A_{layer.id}"
-                sep = nt.nodes.get(sep_name)
-                if sep is None:
-                    sep = _new_node(nt, "CompositorNodeSeparateColor")
-                    if sep is not None:
-                        sep.name = sep_name
+            # 2. Extract Alpha from layer stream
+            sep_name = f"VFX_SEP_A_{layer.id}"
+            sep = nt.nodes.get(sep_name)
+            if sep is None:
+                sep = _new_node(nt, "CompositorNodeSeparateColor")
                 if sep is not None:
-                    sep["vfx_mix"] = 1
-                    sep.location = (780, -mix_index * 200 + 60)
-                    for l in list(sep.inputs[0].links):
-                        nt.links.remove(l)
-                    nt.links.new(sock, sep.inputs[0])
-                    alpha_out = sep.outputs.get("Alpha") or sep.outputs[-1]
-                else:
-                    alpha_out = None
+                    sep.name = sep_name
+            if sep is not None:
+                sep["vfx_mix"] = 1
+                sep.location = (700, -mix_index * 200 - 80)
+                for l in list(sep.inputs[0].links):
+                    nt.links.remove(l)
+                nt.links.new(sock, sep.inputs[0])
+                alpha_out = sep.outputs.get("Alpha") or sep.outputs[-1]
+            else:
+                alpha_out = None
+
+            # 3. Pure Blend Math: Blend(base_in, decal_stream)
+            b_mix_name = f"VFX_MATH_{mix_index:02d}"
+            b_mix, b_a, b_b, b_fac, b_out = _make_mix_node(
+                nt,
+                b_mix_name,
+                f"{layer.layer_name} ({b_mode})",
+                blend_mode=b_mode,
+                location=(850, -mix_index * 200)
+            )
+            if b_mix is not None:
+                b_mix["vfx_mix"] = 1
+                if hasattr(b_mix, "clamp_factor"):
+                    try:
+                        b_mix.clamp_factor = True
+                    except Exception:
+                        pass
+                if b_a is not None and base_in is not None:
+                    nt.links.new(base_in, b_a)
+                if b_b is not None and decal_stream is not None:
+                    nt.links.new(decal_stream, b_b)
+                if b_fac is not None:
+                    b_fac.default_value = 1.0
+
+            # 4. Influence interpolation: Lerp(decal_stream, b_out, influence)
+            # At b_infl=0: 100% decal_stream (pure decal color).
+            # At b_infl=1: 100% b_out (full blend math).
+            # At b_infl=0.4: 60% decal color + 40% blend math!
+            infl_name = f"VFX_INFL_{mix_index:02d}"
+            infl_mix, i_a, i_b, i_fac, i_out = _make_mix_node(
+                nt,
+                infl_name,
+                f"{layer.layer_name} Infl",
+                blend_mode='MIX',
+                location=(1000, -mix_index * 200)
+            )
+            if infl_mix is not None:
+                infl_mix["vfx_mix"] = 1
+                if i_a is not None and decal_stream is not None:
+                    nt.links.new(decal_stream, i_a)
+                if i_b is not None and b_out is not None:
+                    nt.links.new(b_out, i_b)
+                if i_fac is not None:
+                    i_fac.default_value = b_infl
+
+            # 5. Final composite onto background: Mix(base_in, i_out, Factor=alpha * opacity)
+            comp_name = f"VFX_MIX_{mix_index:02d}"
+            comp_mix, c_a, c_b, c_fac, c_out = _make_mix_node(
+                nt,
+                comp_name,
+                f"{layer.layer_name} Composite",
+                blend_mode='MIX',
+                location=(1150, -mix_index * 200)
+            )
+            if comp_mix is not None:
+                comp_mix["vfx_mix"] = 1
 
                 # Opacity modulation
                 if b_opac < 0.999 and alpha_out is not None:
@@ -2964,7 +3031,7 @@ def build_comp_assembly(vfx, master, nt=None):
                     if mul is not None:
                         mul["vfx_mix"] = 1
                         mul.operation = 'MULTIPLY'
-                        mul.location = (860, -mix_index * 200 + 60)
+                        mul.location = (850, -mix_index * 200 - 80)
                         for l in list(mul.inputs[0].links):
                             nt.links.remove(l)
                         nt.links.new(alpha_out, mul.inputs[0])
@@ -2975,14 +3042,14 @@ def build_comp_assembly(vfx, master, nt=None):
                 else:
                     fac_sock = alpha_out
 
-                if a_in is not None and base_in is not None:
-                    nt.links.new(base_in, a_in)
-                if b_in is not None and sock is not None:
-                    nt.links.new(sock, b_in)
-                if fac_in is not None and fac_sock is not None:
-                    nt.links.new(fac_sock, fac_in)
+                if c_a is not None and base_in is not None:
+                    nt.links.new(base_in, c_a)
+                if c_b is not None and i_out is not None:
+                    nt.links.new(i_out, c_b)
+                if c_fac is not None and fac_sock is not None:
+                    nt.links.new(fac_sock, c_fac)
 
-                current = out_s if out_s is not None else current
+                current = c_out if c_out is not None else current
                 mix_index += 1
         else:
             mix = nt.nodes.new("CompositorNodeAlphaOver")

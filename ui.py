@@ -292,6 +292,15 @@ def _draw_layer_list(context, layout):
             r_target.label(text=tr("Blend with:", context), icon='IMAGE_REFERENCE')
             r_target.prop(layer, "blend_target", text="")
 
+            if is_custom_blend:
+                r_infl = bc.row(align=True)
+                r_infl.label(text=tr("Influence:", context), icon='LIGHT')
+                r_infl.prop(layer, "blend_influence", text="", slider=True)
+
+                r_exp = bc.row(align=True)
+                r_exp.label(text=tr("Decal Exposure:", context), icon='LIGHT_SUN')
+                r_exp.prop(layer, "blend_exposure", text="", slider=True)
+
             r_opac = bc.row(align=True)
             r_opac.label(text=tr("Opacity:", context), icon='PROP_OFF')
             r_opac.prop(layer, "blend_opacity", text="", slider=True)

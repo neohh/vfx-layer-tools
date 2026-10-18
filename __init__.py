@@ -409,6 +409,23 @@ class VFXLayer(bpy.types.PropertyGroup):
         subtype='FACTOR',
         update=lambda s, c: _trigger_comp(c),
     )
+    blend_influence: FloatProperty(
+        name="Background Influence",
+        description="How much background lighting and shadows modulate the decal (0.0 = pure original decal color, 1.0 = full blend math)",
+        default=0.5,
+        min=0.0,
+        max=1.0,
+        subtype='FACTOR',
+        update=lambda s, c: _trigger_comp(c),
+    )
+    blend_exposure: FloatProperty(
+        name="Decal Exposure",
+        description="Exposure / brightness trim for the decal before blending (EV): allows brightening dark decal textures",
+        default=0.0,
+        min=-5.0,
+        max=5.0,
+        update=lambda s, c: _trigger_comp(c),
+    )
     blend_expanded: BoolProperty(
         name="Blend Expanded",
         description="Show detailed blend mode settings",

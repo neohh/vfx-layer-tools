@@ -252,6 +252,14 @@ TRANSLATIONS = {
         'RU': "С чем смешивать:",
         'EN': "Blend with:",
     },
+    "Influence:": {
+        'RU': "Влияние фона:",
+        'EN': "Influence:",
+    },
+    "Decal Exposure:": {
+        'RU': "Яркость декали:",
+        'EN': "Decal Exposure:",
+    },
     "Opacity:": {
         'RU': "Непрозрачность:",
         'EN': "Opacity:",
