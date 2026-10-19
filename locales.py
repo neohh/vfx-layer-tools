@@ -238,6 +238,10 @@ TRANSLATIONS = {
         'RU': "Папка",
         'EN': "Folder",
     },
+    "Copy Matte from:": {
+        'RU': "Взять маску из:",
+        'EN': "Copy Matte from:",
+    },
 
     # Blend Modes
     "Blend Mode": {

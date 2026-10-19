@@ -2360,6 +2360,12 @@ class VFX_OT_browse_layer_matte_folder(bpy.types.Operator):
         if layer and layer.holdout_matte_path:
             p = bpy.path.abspath(layer.holdout_matte_path)
             self.directory = p if os.path.isdir(p) else os.path.dirname(p)
+        elif vfx:
+            for other in vfx.layers:
+                if other.holdout_matte_path:
+                    p = bpy.path.abspath(other.holdout_matte_path)
+                    self.directory = p if os.path.isdir(p) else os.path.dirname(p)
+                    break
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
 
@@ -2381,6 +2387,46 @@ class VFX_OT_browse_layer_matte_folder(bpy.types.Operator):
         layer.use_holdout_matte = True
         _trigger_comp(context)
         self.report({'INFO'}, f"Маска подключена к слою '{layer.layer_name}': {self.directory}")
+        return {'FINISHED'}
+
+
+class VFX_OT_copy_matte_from_layer(bpy.types.Operator):
+    bl_idname = "vfx.copy_matte_from_layer"
+    bl_label = "Copy Matte from Another Layer"
+    bl_description = "Скопировать путь к PNG-маске и настройки выреза из другого слоя проекта"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    source_layer_id: StringProperty(name="Source Layer ID", default="")
+
+    def execute(self, context):
+        vfx, master = get_project(context, allow_write=True)
+        layer = active_layer(vfx)
+        if not layer:
+            self.report({'WARNING'}, "Слой не выбран")
+            return {'CANCELLED'}
+
+        src = None
+        if self.source_layer_id and vfx:
+            src = next((l for l in vfx.layers if l.id == self.source_layer_id), None)
+        if src is None and vfx:
+            src = next((l for l in vfx.layers if l.id != layer.id and l.holdout_matte_path), None)
+
+        if not src or not src.holdout_matte_path:
+            self.report({'WARNING'}, "В проекте нет слоев с настроенной маской")
+            return {'CANCELLED'}
+
+        layer.holdout_matte_path = src.holdout_matte_path
+        layer.use_holdout_matte = True
+        layer.holdout_matte_choke = src.holdout_matte_choke
+        layer.holdout_matte_feather = src.holdout_matte_feather
+        layer.holdout_matte_invert = src.holdout_matte_invert
+        layer.holdout_matte_mode = src.holdout_matte_mode
+        layer.holdout_matte_frame_start = src.holdout_matte_frame_start
+        layer.holdout_matte_frame_offset = src.holdout_matte_frame_offset
+        layer.holdout_matte_mask_shadow = src.holdout_matte_mask_shadow
+
+        _trigger_comp(context)
+        self.report({'INFO'}, f"Маска скопирована из слоя '{src.layer_name}'")
         return {'FINISHED'}
 
 

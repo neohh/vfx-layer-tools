@@ -1055,6 +1055,173 @@ def apply_layer_matte(nt, layer, sock, is_shadow=False, loc_x=600, loc_y=0):
     return grp_node.outputs.get("Image") or grp_node.outputs[0]
 
 
+def get_or_create_layer_blend_group(layer, b_mode):
+    """Create or update a self-contained Node Group for layer blend mode compositing.
+    Encapsulates:
+      1. Exposure trim (EV)
+      2. Separate Color (extract Alpha)
+      3. Blend Math (Overlay, Soft Light, Multiply, etc.)
+      4. Influence interpolation (Lerp between raw decal and blend math)
+      5. Opacity modulation (Alpha * Opacity)
+      6. Final composite (Mix onto Background stream)
+
+    Interface:
+      Inputs:
+        Background (NodeSocketColor) - The composite stack underneath
+        Target Plate (NodeSocketColor) - The target stream to blend math against (Background or Stack)
+        Layer Image (NodeSocketColor) - The layer/decal image stream
+        Influence (NodeSocketFloat) - Factor between original decal and blend math (0.0 to 1.0)
+        Exposure (NodeSocketFloat) - EV trim on decal before blend math
+        Opacity (NodeSocketFloat) - Layer opacity (0.0 to 1.0)
+      Outputs:
+        Image (NodeSocketColor) - Resulting composite stream
+    """
+    group_name = f"VFX_Blend_{layer.id}"
+    ng = bpy.data.node_groups.get(group_name)
+    if ng is None:
+        ng = bpy.data.node_groups.new(group_name, 'CompositorNodeTree')
+
+    # Interface setup
+    need_interface = True
+    if hasattr(ng, "interface") and hasattr(ng.interface, "items_tree"):
+        in_socks = [s.name for s in ng.interface.items_tree if getattr(s, "in_out", None) == 'INPUT']
+        out_socks = [s.name for s in ng.interface.items_tree if getattr(s, "in_out", None) == 'OUTPUT']
+        if all(k in in_socks for k in ("Background", "Target Plate", "Layer Image", "Influence", "Exposure", "Opacity")) and "Image" in out_socks:
+            need_interface = False
+
+    if need_interface and hasattr(ng, "interface"):
+        try:
+            for item in list(ng.interface.items_tree):
+                ng.interface.remove(item)
+        except Exception:
+            pass
+        try:
+            ng.interface.new_socket("Background", in_out='INPUT', socket_type='NodeSocketColor')
+            ng.interface.new_socket("Target Plate", in_out='INPUT', socket_type='NodeSocketColor')
+            ng.interface.new_socket("Layer Image", in_out='INPUT', socket_type='NodeSocketColor')
+            ng.interface.new_socket("Influence", in_out='INPUT', socket_type='NodeSocketFloat')
+            ng.interface.new_socket("Exposure", in_out='INPUT', socket_type='NodeSocketFloat')
+            ng.interface.new_socket("Opacity", in_out='INPUT', socket_type='NodeSocketFloat')
+            ng.interface.new_socket("Image", in_out='OUTPUT', socket_type='NodeSocketColor')
+        except Exception as e:
+            print(f"VFX: error creating blend group interface sockets: {e}")
+    elif need_interface and hasattr(ng, "inputs"):
+        try:
+            for s in ("Background", "Target Plate", "Layer Image"):
+                if s not in ng.inputs:
+                    ng.inputs.new('NodeSocketColor', s)
+            for s in ("Influence", "Exposure", "Opacity"):
+                if s not in ng.inputs:
+                    ng.inputs.new('NodeSocketFloat', s)
+            if "Image" not in ng.outputs:
+                ng.outputs.new('NodeSocketColor', "Image")
+        except Exception as e:
+            print(f"VFX: error creating legacy blend group sockets: {e}")
+
+    sig = f"{b_mode}"
+    if ng.get("vfx_blend_sig") == sig and len(ng.nodes) >= 6:
+        return ng
+
+    ng.nodes.clear()
+
+    gin = ng.nodes.new("NodeGroupInput")
+    gin.location = (-600, 0)
+    gout = ng.nodes.new("NodeGroupOutput")
+    gout.location = (800, 0)
+
+    # 1. Exposure node for decal
+    exp_node = _new_node(ng, "CompositorNodeExposure")
+    if exp_node is not None:
+        exp_node.location = (-350, 100)
+        exp_node.name = "Blend_Exposure"
+        ng.links.new(gin.outputs.get("Layer Image") or gin.outputs[2], exp_node.inputs[0])
+        ng.links.new(gin.outputs.get("Exposure") or gin.outputs[4], exp_node.inputs[1])
+        decal_stream = exp_node.outputs[0]
+    else:
+        decal_stream = gin.outputs.get("Layer Image") or gin.outputs[2]
+
+    # 2. Extract Alpha from layer stream
+    sep = _new_node(ng, "CompositorNodeSeparateColor")
+    if sep is not None:
+        sep.location = (-350, -150)
+        sep.name = "Blend_SeparateAlpha"
+        ng.links.new(gin.outputs.get("Layer Image") or gin.outputs[2], sep.inputs[0])
+        alpha_out = sep.outputs.get("Alpha") or sep.outputs[-1]
+    else:
+        alpha_out = None
+
+    # 3. Pure Blend Math: Blend(Target Plate, decal_stream)
+    b_mix, b_a, b_b, b_fac, b_out = _make_mix_node(
+        ng, "Blend_Math", f"Math ({b_mode})", blend_mode=b_mode, location=(-100, 100)
+    )
+    if b_mix is not None:
+        if hasattr(b_mix, "clamp_factor"):
+            try:
+                b_mix.clamp_factor = True
+            except Exception:
+                pass
+        target_plate_sock = gin.outputs.get("Target Plate") or gin.outputs[1]
+        if b_a is not None and target_plate_sock is not None:
+            ng.links.new(target_plate_sock, b_a)
+        if b_b is not None and decal_stream is not None:
+            ng.links.new(decal_stream, b_b)
+        if b_fac is not None:
+            b_fac.default_value = 1.0
+
+    # 4. Influence interpolation: Lerp(decal_stream, b_out, Influence)
+    infl_mix, i_a, i_b, i_fac, i_out = _make_mix_node(
+        ng, "Blend_Influence", "Influence Lerp", blend_mode='MIX', location=(150, 100)
+    )
+    if infl_mix is not None:
+        if i_a is not None and decal_stream is not None:
+            ng.links.new(decal_stream, i_a)
+        if i_b is not None and b_out is not None:
+            ng.links.new(b_out, i_b)
+        infl_sock = gin.outputs.get("Influence") or gin.outputs[3]
+        if i_fac is not None and infl_sock is not None:
+            ng.links.new(infl_sock, i_fac)
+
+    # 5. Opacity modulation: Alpha * Opacity
+    mul = _new_node(ng, "ShaderNodeMath", "CompositorNodeMath")
+    opac_sock = gin.outputs.get("Opacity") or gin.outputs[5]
+    if mul is not None:
+        mul.location = (150, -150)
+        mul.name = "Blend_Opacity"
+        mul.operation = 'MULTIPLY'
+        if alpha_out is not None:
+            ng.links.new(alpha_out, mul.inputs[0])
+        else:
+            mul.inputs[0].default_value = 1.0
+        if opac_sock is not None:
+            ng.links.new(opac_sock, mul.inputs[1])
+        fac_sock = mul.outputs[0]
+    else:
+        fac_sock = alpha_out
+
+    # 6. Final composite: Mix(Background, i_out, Factor=fac_sock)
+    comp_mix, c_a, c_b, c_fac, c_out = _make_mix_node(
+        ng, "Blend_Composite", "Composite over Background", blend_mode='MIX', location=(450, 0)
+    )
+    bg_sock_in = gin.outputs.get("Background") or gin.outputs[0]
+    if comp_mix is not None:
+        if c_a is not None and bg_sock_in is not None:
+            ng.links.new(bg_sock_in, c_a)
+        if c_b is not None and i_out is not None:
+            ng.links.new(i_out, c_b)
+        if c_fac is not None and fac_sock is not None:
+            ng.links.new(fac_sock, c_fac)
+        final_stream = c_out
+    else:
+        final_stream = bg_sock_in
+
+    out_sock = gout.inputs.get("Image") or gout.inputs[0]
+    if final_stream is not None and out_sock is not None:
+        ng.links.new(final_stream, out_sock)
+
+    ng["vfx_blend_sig"] = sig
+    return ng
+
+
 def _cleanup_bg_nodes(nt):
     """Remove background compositor nodes if background is deleted or disabled."""
     if nt is None:
@@ -2630,6 +2797,25 @@ def build_comp_assembly(vfx, master, nt=None):
                 except Exception:
                     pass
 
+    # Clean up inactive / deleted blend node groups
+    active_blend_ids = {layer.id for layer in vfx.layers if getattr(layer, "blend_mode", 'ALPHA_OVER') != 'ALPHA_OVER'}
+    for ng in list(bpy.data.node_groups):
+        if ng.name.startswith("VFX_Blend_"):
+            lid = ng.name[len("VFX_Blend_"):]
+            if lid not in active_blend_ids:
+                try:
+                    bpy.data.node_groups.remove(ng)
+                except Exception:
+                    pass
+
+    # Clean up any legacy loose blend nodes
+    for node in list(nt.nodes):
+        if node.name.startswith(("VFX_EXP_", "VFX_SEP_A_", "VFX_MATH_", "VFX_INFL_", "VFX_OPAC_")):
+            try:
+                nt.nodes.remove(node)
+            except Exception:
+                pass
+
     # Clean up inactive / deleted shadow filter nodes
     active_shd_ids = {layer.id for layer in vfx.layers if layer.shadow_scene or getattr(layer, "shadow_tech", '3D') == 'AI'}
     for node in list(nt.nodes):
@@ -2916,140 +3102,49 @@ def build_comp_assembly(vfx, master, nt=None):
             b_infl = float(getattr(layer, "blend_influence", 0.5))
             b_exp = float(getattr(layer, "blend_exposure", 0.0))
 
-            # Base stream to blend onto
-            if b_target == 'BACKGROUND' and bg_sock is not None:
-                base_in = bg_sock
-            else:
-                base_in = current
+            target_in = bg_sock if (b_target == 'BACKGROUND' and bg_sock is not None) else current
 
-            # 1. Optional Exposure / Brightness trim on the decal stream
-            decal_stream = sock
-            if abs(b_exp) > 0.001:
-                exp_name = f"VFX_EXP_{layer.id}"
-                exp_node = nt.nodes.get(exp_name)
-                if exp_node is None:
-                    exp_node = _new_node(nt, "CompositorNodeExposure")
-                    if exp_node is not None:
-                        exp_node.name = exp_name
-                if exp_node is not None:
-                    exp_node["vfx_mix"] = 1
-                    exp_node.location = (700, -mix_index * 200 + 40)
-                    for l in list(exp_node.inputs[0].links):
-                        nt.links.remove(l)
-                    nt.links.new(sock, exp_node.inputs[0])
-                    try:
-                        exp_node.inputs[1].default_value = b_exp
-                    except Exception:
-                        pass
-                    decal_stream = exp_node.outputs[0]
-            else:
-                exp_node = nt.nodes.get(f"VFX_EXP_{layer.id}")
-                if exp_node is not None:
-                    nt.nodes.remove(exp_node)
+            ng = get_or_create_layer_blend_group(layer, b_mode)
+            group_node_name = f"VFX_BLEND_{mix_index:02d}"
+            bg_node = nt.nodes.get(group_node_name)
+            if bg_node is not None and bg_node.type != 'GROUP':
+                nt.nodes.remove(bg_node)
+                bg_node = None
+            if bg_node is None:
+                bg_node = _new_node(nt, "CompositorNodeGroup", "ShaderNodeGroup", "NodeGroup")
+                if bg_node is not None:
+                    bg_node.name = group_node_name
 
-            # 2. Extract Alpha from layer stream
-            sep_name = f"VFX_SEP_A_{layer.id}"
-            sep = nt.nodes.get(sep_name)
-            if sep is None:
-                sep = _new_node(nt, "CompositorNodeSeparateColor")
-                if sep is not None:
-                    sep.name = sep_name
-            if sep is not None:
-                sep["vfx_mix"] = 1
-                sep.location = (700, -mix_index * 200 - 80)
-                for l in list(sep.inputs[0].links):
-                    nt.links.remove(l)
-                nt.links.new(sock, sep.inputs[0])
-                alpha_out = sep.outputs.get("Alpha") or sep.outputs[-1]
-            else:
-                alpha_out = None
+            if bg_node is not None and ng is not None:
+                bg_node["vfx_mix"] = 1
+                bg_node.node_tree = ng
+                bg_node.label = f"{layer.layer_name} ({b_mode})"
+                bg_node.location = (950, -mix_index * 200)
 
-            # 3. Pure Blend Math: Blend(base_in, decal_stream)
-            b_mix_name = f"VFX_MATH_{mix_index:02d}"
-            b_mix, b_a, b_b, b_fac, b_out = _make_mix_node(
-                nt,
-                b_mix_name,
-                f"{layer.layer_name} ({b_mode})",
-                blend_mode=b_mode,
-                location=(850, -mix_index * 200)
-            )
-            if b_mix is not None:
-                b_mix["vfx_mix"] = 1
-                if hasattr(b_mix, "clamp_factor"):
-                    try:
-                        b_mix.clamp_factor = True
-                    except Exception:
-                        pass
-                if b_a is not None and base_in is not None:
-                    nt.links.new(base_in, b_a)
-                if b_b is not None and decal_stream is not None:
-                    nt.links.new(decal_stream, b_b)
-                if b_fac is not None:
-                    b_fac.default_value = 1.0
-
-            # 4. Influence interpolation: Lerp(decal_stream, b_out, influence)
-            # At b_infl=0: 100% decal_stream (pure decal color).
-            # At b_infl=1: 100% b_out (full blend math).
-            # At b_infl=0.4: 60% decal color + 40% blend math!
-            infl_name = f"VFX_INFL_{mix_index:02d}"
-            infl_mix, i_a, i_b, i_fac, i_out = _make_mix_node(
-                nt,
-                infl_name,
-                f"{layer.layer_name} Infl",
-                blend_mode='MIX',
-                location=(1000, -mix_index * 200)
-            )
-            if infl_mix is not None:
-                infl_mix["vfx_mix"] = 1
-                if i_a is not None and decal_stream is not None:
-                    nt.links.new(decal_stream, i_a)
-                if i_b is not None and b_out is not None:
-                    nt.links.new(b_out, i_b)
-                if i_fac is not None:
-                    i_fac.default_value = b_infl
-
-            # 5. Final composite onto image stack: Mix(current, i_out, Factor=alpha * opacity)
-            comp_name = f"VFX_MIX_{mix_index:02d}"
-            comp_mix, c_a, c_b, c_fac, c_out = _make_mix_node(
-                nt,
-                comp_name,
-                f"{layer.layer_name} Composite",
-                blend_mode='MIX',
-                location=(1150, -mix_index * 200)
-            )
-            if comp_mix is not None:
-                comp_mix["vfx_mix"] = 1
-
-                # Opacity modulation
-                if b_opac < 0.999 and alpha_out is not None:
-                    mul_name = f"VFX_OPAC_{layer.id}"
-                    mul = nt.nodes.get(mul_name)
-                    if mul is None:
-                        mul = _new_node(nt, "ShaderNodeMath", "CompositorNodeMath")
-                        if mul is not None:
-                            mul.name = mul_name
-                    if mul is not None:
-                        mul["vfx_mix"] = 1
-                        mul.operation = 'MULTIPLY'
-                        mul.location = (850, -mix_index * 200 - 80)
-                        for l in list(mul.inputs[0].links):
+                def _connect(sock_out, in_name):
+                    target_s = bg_node.inputs.get(in_name)
+                    if target_s is not None and sock_out is not None:
+                        for l in list(target_s.links):
                             nt.links.remove(l)
-                        nt.links.new(alpha_out, mul.inputs[0])
-                        mul.inputs[1].default_value = b_opac
-                        fac_sock = mul.outputs[0]
-                    else:
-                        fac_sock = alpha_out
-                else:
-                    fac_sock = alpha_out
+                        nt.links.new(sock_out, target_s)
 
-                if c_a is not None and current is not None:
-                    nt.links.new(current, c_a)
-                if c_b is not None and i_out is not None:
-                    nt.links.new(i_out, c_b)
-                if c_fac is not None and fac_sock is not None:
-                    nt.links.new(fac_sock, c_fac)
+                def _set_val(in_name, val):
+                    s = bg_node.inputs.get(in_name)
+                    if s is not None:
+                        try:
+                            s.default_value = val
+                        except Exception:
+                            pass
 
-                current = c_out if c_out is not None else current
+                _connect(current, "Background")
+                _connect(target_in, "Target Plate")
+                _connect(sock, "Layer Image")
+                _set_val("Influence", b_infl)
+                _set_val("Exposure", b_exp)
+                _set_val("Opacity", b_opac)
+
+                out_s = bg_node.outputs.get("Image") or (bg_node.outputs[0] if bg_node.outputs else None)
+                current = out_s if out_s is not None else current
                 mix_index += 1
         else:
             mix = nt.nodes.new("CompositorNodeAlphaOver")

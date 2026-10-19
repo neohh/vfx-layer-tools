@@ -407,6 +407,11 @@ def _draw_layer_list(context, layout):
                 s_row.label(text=f"{tr('Frames:', context)} {count} (st: {first_f})", icon='CHECKMARK')
             else:
                 s_row.label(text=status, icon='ERROR')
+                other = next((l for l in vfx.layers if l.id != layer.id and l.holdout_matte_path), None)
+                if other:
+                    c_row = mc.row(align=True)
+                    op = c_row.operator("vfx.copy_matte_from_layer", text=f"{tr('Copy Matte from:', context)} {other.layer_name}", icon='COPYDOWN')
+                    op.source_layer_id = other.id
 
             mc.separator()
             r_sync = mc.row(align=True)
