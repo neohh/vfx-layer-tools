@@ -833,8 +833,8 @@ def get_or_create_layer_matte_group(layer):
     invert = getattr(layer, "holdout_matte_invert", False)
     mode = getattr(layer, "holdout_matte_mode", 'LUMA')
 
-    sig = f"{path}_{fstart}_{foffset}_{choke}_{feather}_{invert}_{mode}"
-    if ng.get("vfx_matte_sig") == sig and len(ng.nodes) >= 9:
+    sig = f"{path}_{fstart}_{foffset}_{choke}_{feather}_{invert}_{mode}_{num_files}_gate_v1"
+    if ng.get("vfx_matte_sig") == sig and len(ng.nodes) >= 12:
         return ng
 
     ng.nodes.clear()
@@ -842,7 +842,7 @@ def get_or_create_layer_matte_group(layer):
     gin = ng.nodes.new("NodeGroupInput")
     gin.location = (-600, 0)
     gout = ng.nodes.new("NodeGroupOutput")
-    gout.location = (1400, 0)
+    gout.location = (1650, 0)
 
     # 1. Matte image sequence
     img_node = ng.nodes.new("CompositorNodeImage")
@@ -909,6 +909,61 @@ def get_or_create_layer_matte_group(layer):
             ng.links.new(cur_mask, blur_node.inputs[0])
             cur_mask = blur_node.outputs[0]
 
+    # 5.5. Frame Range Gate
+    # When animation timeline goes past the last sequence frame (or before start),
+    # Blender's Image node clamps/holds the last frame. Zero out the mask (black = 0.0)
+    # so that once the video ends, the mask does not freeze-cutout the 3D objects!
+    in_range_sock = None
+    if num_files > 0:
+        st_node = _new_node(ng, "CompositorNodeSceneTime")
+        if st_node is not None:
+            f_sock = st_node.outputs.get("Frame")
+            if f_sock is not None:
+                st_node.name = "Matte_SceneTime"
+                st_node.location = (400, 450)
+
+                range_start = fstart - foffset
+                range_end = fstart - foffset + num_files - 1
+
+                m_ge = _new_node(ng, "ShaderNodeMath", "CompositorNodeMath")
+                if m_ge is not None:
+                    m_ge.name = "Matte_RangeMin"
+                    m_ge.label = f">= {range_start}"
+                    m_ge.operation = 'GREATER_THAN'
+                    m_ge.location = (580, 480)
+                    m_ge.inputs[1].default_value = float(range_start) - 0.5
+                    ng.links.new(f_sock, m_ge.inputs[0])
+
+                m_le = _new_node(ng, "ShaderNodeMath", "CompositorNodeMath")
+                if m_le is not None:
+                    m_le.name = "Matte_RangeMax"
+                    m_le.label = f"<= {range_end}"
+                    m_le.operation = 'LESS_THAN'
+                    m_le.location = (580, 360)
+                    m_le.inputs[1].default_value = float(range_end) + 0.5
+                    ng.links.new(f_sock, m_le.inputs[0])
+
+                if m_ge is not None and m_le is not None:
+                    m_and = _new_node(ng, "ShaderNodeMath", "CompositorNodeMath")
+                    if m_and is not None:
+                        m_and.name = "Matte_InRange"
+                        m_and.label = "In Frame Range"
+                        m_and.operation = 'MULTIPLY'
+                        m_and.location = (740, 420)
+                        ng.links.new(m_ge.outputs[0], m_and.inputs[0])
+                        ng.links.new(m_le.outputs[0], m_and.inputs[1])
+                        in_range_sock = m_and.outputs[0]
+
+                        m_gate = _new_node(ng, "ShaderNodeMath", "CompositorNodeMath")
+                        if m_gate is not None:
+                            m_gate.name = "Matte_ApplyGate"
+                            m_gate.label = "Gate Mask"
+                            m_gate.operation = 'MULTIPLY'
+                            m_gate.location = (740, 200)
+                            ng.links.new(cur_mask, m_gate.inputs[0])
+                            ng.links.new(in_range_sock, m_gate.inputs[1])
+                            cur_mask = m_gate.outputs[0]
+
     # 6. Invert (Cutout vs Keep factor)
     # Default (invert=False): white mask = CUT OUT layer (F = 1 - mask).
     # Invert (invert=True): white mask = KEEP layer (F = mask).
@@ -919,14 +974,32 @@ def get_or_create_layer_matte_group(layer):
             sub_node.name = "Matte_Invert"
             sub_node.label = "1.0 - Matte (Cutout)"
             sub_node.operation = 'SUBTRACT'
-            sub_node.location = (600, 200)
+            sub_node.location = (920, 200)
             sub_node.inputs[0].default_value = 1.0
             ng.links.new(cur_mask, sub_node.inputs[1])
             fac_sock = sub_node.outputs[0]
         else:
             fac_sock = cur_mask
     else:
-        fac_sock = cur_mask
+        # Inverted mode: cur_mask=1 means keep, 0 means cut out.
+        # When outside frame range (in_range=0), we want to KEEP everything (fac=1.0).
+        if in_range_sock is not None:
+            inv_range = _new_node(ng, "ShaderNodeMath", "CompositorNodeMath")
+            inv_range.name = "Matte_InvRange"
+            inv_range.operation = 'SUBTRACT'
+            inv_range.location = (920, 320)
+            inv_range.inputs[0].default_value = 1.0
+            ng.links.new(in_range_sock, inv_range.inputs[1])
+
+            add_range = _new_node(ng, "ShaderNodeMath", "CompositorNodeMath")
+            add_range.name = "Matte_AddKeep"
+            add_range.operation = 'ADD'
+            add_range.location = (1060, 200)
+            ng.links.new(cur_mask, add_range.inputs[0])
+            ng.links.new(inv_range.outputs[0], add_range.inputs[1])
+            fac_sock = add_range.outputs[0]
+        else:
+            fac_sock = cur_mask
 
     # Connect raw mask to Group Output 'Matte' socket
     m_out = gout.inputs.get("Matte") or (gout.inputs[1] if len(gout.inputs) > 1 else None)
@@ -940,7 +1013,7 @@ def get_or_create_layer_matte_group(layer):
     sep = _new_node(ng, "CompositorNodeSeparateColor")
     if sep is not None:
         sep.name = "Cutout_SepColor"
-        sep.location = (800, 50)
+        sep.location = (1100, 50)
         ng.links.new(in_img, sep.inputs[0])
         orig_a = sep.outputs.get("Alpha") or sep.outputs[-1]
     else:
@@ -951,7 +1024,7 @@ def get_or_create_layer_matte_group(layer):
     if mul_a is not None:
         mul_a.name = "Cutout_MulAlpha"
         mul_a.operation = 'MULTIPLY'
-        mul_a.location = (1000, 80)
+        mul_a.location = (1280, 80)
         if orig_a is not None:
             ng.links.new(orig_a, mul_a.inputs[0])
         else:
@@ -964,7 +1037,7 @@ def get_or_create_layer_matte_group(layer):
     # RGB multiply: RGB * fac
     mul_rgb, a_in, b_in, fac_in, out_s = _make_mix_node(
         ng, "Cutout_MulRGB", "Multiply RGB",
-        blend_mode='MULTIPLY', location=(1000, -80)
+        blend_mode='MULTIPLY', location=(1280, -80)
     )
     if mul_rgb is not None:
         if fac_in is not None:
@@ -981,7 +1054,7 @@ def get_or_create_layer_matte_group(layer):
     sa = _new_node(ng, "CompositorNodeSetAlpha")
     if sa is not None:
         sa.name = "Cutout_SetAlpha"
-        sa.location = (1200, 0)
+        sa.location = (1460, 0)
         if hasattr(sa, "mode"):
             try:
                 sa.mode = 'REPLACE'

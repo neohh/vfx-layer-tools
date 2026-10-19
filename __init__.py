@@ -116,21 +116,29 @@ def _engine_label(i):
     return i.replace("BLENDER_", "").replace("_", " ").title()
 
 
+_ENGINE_EEVEE_CACHE = []
+_ENGINE_CYCLES_CACHE = []
+
+
 def _engine_items_eevee_first(self, context):
+    global _ENGINE_EEVEE_CACHE
     ids = [i.identifier for i in bpy.types.RenderSettings.bl_rna.properties['engine'].enum_items]
     if "CYCLES" not in ids:
         ids = ["CYCLES"] + ids
     pref = "BLENDER_EEVEE_NEXT" if "BLENDER_EEVEE_NEXT" in ids else (ids[0] if ids else "CYCLES")
     ordered = [pref] + [i for i in ids if i != pref]
-    return [(i, _engine_label(i), "") for i in ordered]
+    _ENGINE_EEVEE_CACHE = [(i, _engine_label(i), "") for i in ordered]
+    return _ENGINE_EEVEE_CACHE
 
 
 def _engine_items_cycles_first(self, context):
+    global _ENGINE_CYCLES_CACHE
     ids = [i.identifier for i in bpy.types.RenderSettings.bl_rna.properties['engine'].enum_items]
     if "CYCLES" not in ids:
         ids = ["CYCLES"] + ids
     ordered = ["CYCLES"] + [i for i in ids if i != "CYCLES"]
-    return [(i, _engine_label(i), "") for i in ordered]
+    _ENGINE_CYCLES_CACHE = [(i, _engine_label(i), "") for i in ordered]
+    return _ENGINE_CYCLES_CACHE
 
 
 # ---------------------------------------------------------------------

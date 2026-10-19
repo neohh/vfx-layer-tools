@@ -2506,11 +2506,21 @@ class VFX_OT_open_layer_matte_folder(bpy.types.Operator):
         return {'FINISHED'}
 
 
+_VFX_LAYER_ITEMS_CACHE = []
+
 def _get_vfx_layer_items(self, context):
+    global _VFX_LAYER_ITEMS_CACHE
     vfx, master = get_project(context, allow_write=False)
     if not vfx or not vfx.layers:
-        return [('NONE', "Нет слоев", "")]
-    return [(l.id, l.layer_name, f"Слой '{l.layer_name}'") for l in vfx.layers]
+        _VFX_LAYER_ITEMS_CACHE = [('NONE', "Нет слоев", "")]
+        return _VFX_LAYER_ITEMS_CACHE
+    items = []
+    for l in vfx.layers:
+        lid = str(l.id)
+        lname = str(l.layer_name) if l.layer_name else "Layer"
+        items.append((lid, lname, f"Слой: {lname}"))
+    _VFX_LAYER_ITEMS_CACHE = items
+    return _VFX_LAYER_ITEMS_CACHE
 
 
 class VFX_OT_assign_layer_mask_dialog(bpy.types.Operator):
@@ -2577,6 +2587,10 @@ class VFX_OT_assign_layer_mask_dialog(bpy.types.Operator):
             self.target_layer_id = layer.id
             if layer.holdout_matte_path:
                 self.folder_path = layer.holdout_matte_path
+            elif vfx:
+                other = next((l for l in vfx.layers if l.holdout_matte_path), None)
+                if other:
+                    self.folder_path = other.holdout_matte_path
             self.invert = layer.holdout_matte_invert
             self.mode = layer.holdout_matte_mode
             self.feather = layer.holdout_matte_feather
