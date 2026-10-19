@@ -3008,7 +3008,7 @@ def build_comp_assembly(vfx, master, nt=None):
                 if i_fac is not None:
                     i_fac.default_value = b_infl
 
-            # 5. Final composite onto background: Mix(base_in, i_out, Factor=alpha * opacity)
+            # 5. Final composite onto image stack: Mix(current, i_out, Factor=alpha * opacity)
             comp_name = f"VFX_MIX_{mix_index:02d}"
             comp_mix, c_a, c_b, c_fac, c_out = _make_mix_node(
                 nt,
@@ -3042,8 +3042,8 @@ def build_comp_assembly(vfx, master, nt=None):
                 else:
                     fac_sock = alpha_out
 
-                if c_a is not None and base_in is not None:
-                    nt.links.new(base_in, c_a)
+                if c_a is not None and current is not None:
+                    nt.links.new(current, c_a)
                 if c_b is not None and i_out is not None:
                     nt.links.new(i_out, c_b)
                 if c_fac is not None and fac_sock is not None:
