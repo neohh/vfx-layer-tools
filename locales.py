@@ -226,6 +226,14 @@ TRANSLATIONS = {
         'RU': "Мягкость",
         'EN': "Feather",
     },
+    "Undistort (Match Footage)": {
+        'RU': "Выпрямлять по линзе",
+        'EN': "Undistort (Match Footage)",
+    },
+    "Undistort Matte (Lens)": {
+        'RU': "Выпрямлять маску по линзе",
+        'EN': "Undistort Matte (Lens)",
+    },
     "Cutout from Shadow": {
         'RU': "Вырезать и из тени",
         'EN': "Cutout from Shadow",
@@ -461,6 +469,10 @@ TRANSLATIONS = {
     "Chromatic:": {
         'RU': "Хроматика:",
         'EN': "Chromatic:",
+    },
+    "Undistorts BG -> Redistorts Comp": {
+        'RU': "Убирает с фона → Применяет в конце",
+        'EN': "Undistorts BG -> Redistorts Comp",
     },
     "COLOR GRADING (Grade)": {
         'RU': "ЦВЕТОКОРРЕКЦИЯ (Grade)",

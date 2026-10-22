@@ -527,6 +527,12 @@ class VFXLayer(bpy.types.PropertyGroup):
         default=True,
         update=lambda s, c: _trigger_comp(c)
     )
+    holdout_matte_undistort: BoolProperty(
+        name="Выпрямлять маску по линзе",
+        description="Применять обратную дисторшн линзы к маске для точного совпадения с выпрямленным фоном",
+        default=True,
+        update=lambda s, c: _trigger_comp(c)
+    )
     holdout_matte_expanded: BoolProperty(
         name="Развернуть маску",
         description="Развернуть блок настроек внешней маски выреза",
@@ -1182,7 +1188,7 @@ class VFXProject(bpy.types.PropertyGroup):
         update=lambda s, c: _trigger_comp(c)
     )
     lensdist_distort: FloatProperty(
-        name="Distort", default=0.02, min=-1.0, max=1.0,
+        name="Distort", default=0.019, min=-1.0, max=1.0,
         update=lambda s, c: _trigger_comp(c)
     )
     lensdist_disperse: FloatProperty(

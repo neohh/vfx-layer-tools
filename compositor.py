@@ -783,7 +783,31 @@ def _make_mix_node(nt, name, label, blend_mode='MULTIPLY', location=(0, 0)):
     return mix, a_in, b_in, fac_in, out_s
 
 
-def get_or_create_layer_matte_group(layer):
+def _enable_lensdist_fit(node):
+    """Ensure the 'Fit' option is enabled on a CompositorNodeLensdist node,
+    supporting both property and socket interfaces across Blender versions.
+    """
+    if node is None:
+        return
+    if hasattr(node, "use_fit"):
+        try:
+            node.use_fit = True
+        except Exception:
+            pass
+    fit_s = node.inputs.get("Fit") if hasattr(node, "inputs") else None
+    if fit_s is None and hasattr(node, "inputs"):
+        for si in node.inputs:
+            if "fit" in si.name.lower():
+                fit_s = si
+                break
+    if fit_s is not None:
+        try:
+            fit_s.default_value = True
+        except Exception:
+            pass
+
+
+def get_or_create_layer_matte_group(layer, vfx=None):
     """Create or update a self-contained Node Group for holdout matte cutout.
     Interface:
       Input:
@@ -826,6 +850,13 @@ def get_or_create_layer_matte_group(layer):
         except Exception as e:
             print(f"VFX: error creating matte group interface sockets: {e}")
 
+    if vfx is None:
+        vfx = getattr(getattr(layer, "id_data", None), "vfx", None)
+
+    use_ld = bool(getattr(vfx, "use_lensdist", False)) if vfx else False
+    undistort_matte = bool(getattr(layer, "holdout_matte_undistort", True)) and use_ld
+    inv_distort = -float(getattr(vfx, "lensdist_distort", 0.0)) if undistort_matte else 0.0
+
     fstart = getattr(layer, "holdout_matte_frame_start", 1)
     foffset = getattr(layer, "holdout_matte_frame_offset", 0)
     choke = int(getattr(layer, "holdout_matte_choke", 0))
@@ -833,22 +864,22 @@ def get_or_create_layer_matte_group(layer):
     invert = getattr(layer, "holdout_matte_invert", False)
     mode = getattr(layer, "holdout_matte_mode", 'LUMA')
 
-    sig = f"{path}_{fstart}_{foffset}_{choke}_{feather}_{invert}_{mode}_{num_files}_gate_v1"
+    sig = f"{path}_{fstart}_{foffset}_{choke}_{feather}_{invert}_{mode}_{num_files}_{undistort_matte}_{inv_distort:.5f}_gate_v3"
     if ng.get("vfx_matte_sig") == sig and len(ng.nodes) >= 12:
         return ng
 
     ng.nodes.clear()
 
     gin = ng.nodes.new("NodeGroupInput")
-    gin.location = (-600, 0)
+    gin.location = (-750, 0)
     gout = ng.nodes.new("NodeGroupOutput")
-    gout.location = (1650, 0)
+    gout.location = (1750, 0)
 
     # 1. Matte image sequence
     img_node = ng.nodes.new("CompositorNodeImage")
     img_node.name = "Matte_Image"
     img_node.label = f"Matte Seq ({num_files} frames)"
-    img_node.location = (-400, 200)
+    img_node.location = (-550, 200)
     _configure_image_node_sequence(img_node, img, is_static=False, frame_start=fstart, frame_offset=foffset)
 
     # 2. Scale node (match canvas resolution)
@@ -856,12 +887,38 @@ def get_or_create_layer_matte_group(layer):
     if scale_node is not None:
         scale_node.name = "Matte_Scale"
         scale_node.label = "Scale to Canvas"
-        scale_node.location = (-200, 200)
+        scale_node.location = (-350, 200)
         _setup_scale_node(scale_node)
         ng.links.new(img_node.outputs["Image"], scale_node.inputs[0])
         matte_color_out = scale_node.outputs.get("Image") or img_node.outputs.get("Image")
     else:
         matte_color_out = img_node.outputs.get("Image")
+
+    # 2.5. Undistort node (Match undistorted background plate)
+    if undistort_matte and abs(inv_distort) > 1e-6:
+        dist_node = _new_node(ng, "CompositorNodeLensdist")
+        if dist_node is not None:
+            dist_node.name = "Matte_Undistort"
+            dist_node.label = f"Undistort Matte ({inv_distort:+.3f})"
+            dist_node.location = (-150, 200)
+
+            for target_key, val in (("distort", inv_distort), ("dispersion", 0.0)):
+                s = None
+                for si in dist_node.inputs:
+                    if target_key in si.name.lower():
+                        s = si
+                        break
+                if s is not None:
+                    try:
+                        s.default_value = val
+                    except Exception:
+                        pass
+
+            _enable_lensdist_fit(dist_node)
+
+            d_in = dist_node.inputs.get("Image") or dist_node.inputs[0]
+            ng.links.new(matte_color_out, d_in)
+            matte_color_out = dist_node.outputs.get("Image") or dist_node.outputs[0]
 
     # 3. Channel selection
     mode = getattr(layer, "holdout_matte_mode", 'LUMA')
@@ -1080,7 +1137,7 @@ def get_or_create_layer_matte_group(layer):
     return ng
 
 
-def apply_layer_matte(nt, layer, sock, is_shadow=False, loc_x=600, loc_y=0):
+def apply_layer_matte(nt, layer, sock, is_shadow=False, loc_x=600, loc_y=0, vfx=None):
     """Apply an external PNG image sequence matte (holdout) to a layer's image socket
     via an encapsulated Node Group.
     """
@@ -1095,7 +1152,10 @@ def apply_layer_matte(nt, layer, sock, is_shadow=False, loc_x=600, loc_y=0):
         cleanup_layer_matte_nodes(nt, layer.id, is_shadow=True)
         return sock
 
-    ng = get_or_create_layer_matte_group(layer)
+    if vfx is None:
+        vfx = getattr(getattr(layer, "id_data", None), "vfx", None)
+
+    ng = get_or_create_layer_matte_group(layer, vfx=vfx)
     if ng is None:
         cleanup_layer_matte_nodes(nt, layer.id, is_shadow=is_shadow)
         return sock
@@ -1299,7 +1359,7 @@ def _cleanup_bg_nodes(nt):
     """Remove background compositor nodes if background is deleted or disabled."""
     if nt is None:
         return
-    for name in ("VFX_RL_BG", "VFX_BG_IMG", "VFX_BG_CLIP", "VFX_BG_SCALE"):
+    for name in ("VFX_RL_BG", "VFX_BG_IMG", "VFX_BG_CLIP", "VFX_BG_SCALE", "VFX_BG_UNDISTORT"):
         n = nt.nodes.get(name)
         if n:
             nt.nodes.remove(n)
@@ -1504,6 +1564,67 @@ def ensure_background_node(vfx, master, nt):
         return scale_node.outputs.get("Image") or source_sock
 
     return source_sock
+
+
+def ensure_background_undistort(vfx, master, nt, bg_sock):
+    """If Lens Distortion is enabled on the project, apply the inverse distortion
+    (-lensdist_distort) to the raw background plate. This undistorts the camera
+    footage so straight-line 3D CGI objects composite into true rectilinear space.
+    The matching positive distortion (+lensdist_distort) is reapplied at the end
+    of the composite graph (VFX_LENSDIST).
+    """
+    if nt is None or bg_sock is None:
+        return bg_sock
+
+    if not getattr(vfx, "use_lensdist", False):
+        _remove_nodes(nt, "VFX_BG_UNDISTORT")
+        return bg_sock
+
+    node = nt.nodes.get("VFX_BG_UNDISTORT")
+    if node is not None and node.type != 'LENSDIST':
+        nt.nodes.remove(node)
+        node = None
+    if node is None:
+        try:
+            node = nt.nodes.new("CompositorNodeLensdist")
+            node.name = "VFX_BG_UNDISTORT"
+            node.label = "UNDISTORT BG"
+        except Exception as e:
+            print("VFX: failed to create VFX_BG_UNDISTORT node:", e)
+            return bg_sock
+
+    node.label = "UNDISTORT BG"
+    scale_node = nt.nodes.get("VFX_BG_SCALE")
+    if scale_node is not None:
+        node.location = (scale_node.location.x + 220, scale_node.location.y)
+    else:
+        node.location = (440, 450)
+
+    # Invert the distortion coefficient: -distort
+    inv_distort = -float(getattr(vfx, "lensdist_distort", 0.0))
+    for target_key, val in (("distort", inv_distort), ("dispersion", 0.0)):
+        s = None
+        for si in node.inputs:
+            if target_key in si.name.lower():
+                s = si
+                break
+        if s is not None:
+            try:
+                s.default_value = val
+            except Exception:
+                pass
+
+    _enable_lensdist_fit(node)
+
+    img_in = node.inputs.get("Image")
+    if img_in is None and node.inputs:
+        img_in = node.inputs[0]
+    if img_in is not None:
+        for l in list(img_in.links):
+            nt.links.remove(l)
+        nt.links.new(bg_sock, img_in)
+
+    return node.outputs.get("Image") or (node.outputs[0] if node.outputs else bg_sock)
 
 
 def rebuild_comp_from_files(vfx, master):
@@ -2937,6 +3058,10 @@ def build_comp_assembly(vfx, master, nt=None):
                 sockets.append((layer, "OBJ", ob_sock))
 
     bg_sock = ensure_background_node(vfx, master, nt)
+    if bg_sock is not None and getattr(vfx, "use_lensdist", False):
+        bg_sock = ensure_background_undistort(vfx, master, nt, bg_sock)
+    else:
+        _remove_nodes(nt, "VFX_BG_UNDISTORT")
 
     if not sockets and bg_sock is None:
         return
@@ -3106,12 +3231,12 @@ def build_comp_assembly(vfx, master, nt=None):
         stack_sock = blur_nodes.get(first_layer.id, grade_nodes.get(first_layer.id, first_sock)) if first_kind == 'OBJ' else first_sock
         if first_kind == 'OBJ':
             if getattr(first_layer, "use_holdout_matte", False):
-                stack_sock = apply_layer_matte(nt, first_layer, stack_sock, is_shadow=False, loc_x=650, loc_y=100)
+                stack_sock = apply_layer_matte(nt, first_layer, stack_sock, is_shadow=False, loc_x=650, loc_y=100, vfx=vfx)
             else:
                 cleanup_layer_matte_nodes(nt, first_layer.id, is_shadow=False)
         elif first_kind == 'SHD':
             if getattr(first_layer, "use_holdout_matte", False) and getattr(first_layer, "holdout_matte_mask_shadow", True):
-                stack_sock = apply_layer_matte(nt, first_layer, stack_sock, is_shadow=True, loc_x=720, loc_y=-100)
+                stack_sock = apply_layer_matte(nt, first_layer, stack_sock, is_shadow=True, loc_x=720, loc_y=-100, vfx=vfx)
             else:
                 cleanup_layer_matte_nodes(nt, first_layer.id, is_shadow=True)
         mix_list = sockets[1:]
@@ -3132,12 +3257,12 @@ def build_comp_assembly(vfx, master, nt=None):
                     sock = gsock
 
             if getattr(layer, "use_holdout_matte", False):
-                sock = apply_layer_matte(nt, layer, sock, is_shadow=False, loc_x=650, loc_y=-mix_index * 200 + 80)
+                sock = apply_layer_matte(nt, layer, sock, is_shadow=False, loc_x=650, loc_y=-mix_index * 200 + 80, vfx=vfx)
             else:
                 cleanup_layer_matte_nodes(nt, layer.id, is_shadow=False)
         elif kind == 'SHD':
             if getattr(layer, "use_holdout_matte", False) and getattr(layer, "holdout_matte_mask_shadow", True):
-                sock = apply_layer_matte(nt, layer, sock, is_shadow=True, loc_x=720, loc_y=-mix_index * 200 - 80)
+                sock = apply_layer_matte(nt, layer, sock, is_shadow=True, loc_x=720, loc_y=-mix_index * 200 - 80, vfx=vfx)
             else:
                 cleanup_layer_matte_nodes(nt, layer.id, is_shadow=True)
 
@@ -3458,24 +3583,24 @@ def build_comp_assembly(vfx, master, nt=None):
             try:
                 ld = nt.nodes.new("CompositorNodeLensdist")
                 ld.name = "VFX_LENSDIST"
-                ld.label = "LENS DIST"
+                ld.label = "REDISTORT COMP"
             except Exception:
                 ld = None
         if ld is not None:
             ld.location = (_PX_LD, _PY)
-            # Set by exact socket name so panel values always match the node
-            for name, val in (("Distort", vfx.lensdist_distort), ("Dispersion", vfx.lensdist_disperse)):
-                s = ld.inputs.get(name)
-                if s is None:
-                    for si in ld.inputs:
-                        if si.name.lower() == name.lower():
-                            s = si
-                            break
+            # Set socket matching both Blender 4.x ("Distort") and Blender 5.x ("Distortion")
+            for target_key, val in (("distort", vfx.lensdist_distort), ("dispersion", vfx.lensdist_disperse)):
+                s = None
+                for si in ld.inputs:
+                    if target_key in si.name.lower():
+                        s = si
+                        break
                 if s is not None:
                     try:
                         s.default_value = val
                     except Exception:
                         pass
+            _enable_lensdist_fit(ld)
             img_in = ld.inputs.get("Image")
             if img_in is None and ld.inputs:
                 img_in = ld.inputs[0]

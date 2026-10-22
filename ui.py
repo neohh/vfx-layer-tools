@@ -428,6 +428,8 @@ def _draw_layer_list(context, layout):
 
             if layer.shadow_scene:
                 mc.prop(layer, "holdout_matte_mask_shadow", text=tr("Cutout from Shadow", context))
+            if getattr(vfx, "use_lensdist", False):
+                mc.prop(layer, "holdout_matte_undistort", text=tr("Undistort (Match Footage)", context))
 
             mc.separator()
             b_row = mc.row(align=True)
@@ -760,6 +762,8 @@ def _draw_post_effects(context, layout):
         lc = ldbox.column(align=True)
         lc.prop(vfx, "lensdist_distort", text=tr("Distortion:", context))
         lc.prop(vfx, "lensdist_disperse", text=tr("Chromatic:", context))
+        info_row = lc.row(align=True)
+        info_row.label(text=tr("Undistorts BG -> Redistorts Comp", context), icon='INFO')
 
     # ── COLOR GRADING (GRADE) ──
     mgbox = box_fx.box()
